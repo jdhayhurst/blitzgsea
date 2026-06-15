@@ -10,7 +10,6 @@ from scipy.special import gammainc
 from scipy.stats import gamma, kstest
 from statsmodels.nonparametric.smoothers_lowess import lowess
 from statsmodels.stats.multitest import multipletests
-from tqdm import tqdm
 
 from blitzgsea.mpsci import gammacdf, invcdf
 from blitzgsea.signature_similarity import best_kl_fit, create_pdf
@@ -19,7 +18,10 @@ mp.dps = 1000
 mp.prec = 1000
 pdf_cache: dict = {}
 
-def estimate_anchor_star(args: tuple) -> tuple[float, float, float, float, float, float, float]:
+
+def estimate_anchor_star(
+    args: tuple,
+) -> tuple[float, float, float, float, float, float, float]:
     return estimate_anchor(*args)
 
 
@@ -76,7 +78,9 @@ def estimate_anchor(
     return alpha_pos, beta_pos, ks_pos, alpha_neg, beta_neg, ks_neg, pos_ratio
 
 
-def strip_gene_set(signature_genes: set[str], gene_set: list[str] | set[str]) -> list[str]:
+def strip_gene_set(
+    signature_genes: set[str], gene_set: list[str] | set[str]
+) -> list[str]:
     return [x for x in gene_set if x in signature_genes]
 
 
@@ -298,7 +302,15 @@ def estimate_parameters(
     progress: bool = False,
     seed: int = 0,
     ks_disable: bool = False,
-) -> tuple[interpolate.interp1d, interpolate.interp1d, interpolate.interp1d, interpolate.interp1d, interpolate.interp1d, float, float]:
+) -> tuple[
+    interpolate.interp1d,
+    interpolate.interp1d,
+    interpolate.interp1d,
+    interpolate.interp1d,
+    interpolate.interp1d,
+    float,
+    float,
+]:
     max_ll = int(np.max([len(v) for v in library.values()]))
 
     # Log-spaced anchors give dense coverage of small gene sets where the
@@ -389,7 +401,9 @@ def estimate_parameters(
     )
 
 
-def clean_library(library: dict[str, set[str]], signature: pl.DataFrame) -> dict[str, set[str]]:
+def clean_library(
+    library: dict[str, set[str]], signature: pl.DataFrame
+) -> dict[str, set[str]]:
     valid_elements = set(signature["i"].to_list())
     return {key: gene_set & valid_elements for key, gene_set in library.items()}
 
@@ -572,9 +586,7 @@ def gsea(
             valid_gsets.append((k, stripped))
 
     if valid_gsets:
-        unique_sizes = np.array(
-            sorted({len(s) for _, s in valid_gsets}), dtype=float
-        )
+        unique_sizes = np.array(sorted({len(s) for _, s in valid_gsets}), dtype=float)
         _apos = f_alpha_pos(unique_sizes)
         _bpos = f_beta_pos(unique_sizes)
         _prat = np.clip(f_pos_ratio(unique_sizes), 0.0, 1.0)
