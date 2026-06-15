@@ -1,6 +1,6 @@
 import os
 import numpy as np
-import pandas as pd
+import polars as pl
 import pytest
 
 KEGG_PATH = os.path.join(os.path.dirname(__file__), "../blitzgsea/data/KEGG_2021_Human")
@@ -22,12 +22,18 @@ def sig_map_10():
 
 
 @pytest.fixture
+def gene_names_10():
+    """Ordered list of gene names matching the 10-gene signature."""
+    return [f"GENE_{i}" for i in range(10)]
+
+
+@pytest.fixture
 def sig_df_10():
-    """Signature DataFrame indexed by gene name, already sorted descending."""
-    return pd.DataFrame(
-        {"v": [float(v) for v in range(10, 0, -1)]},
-        index=[f"GENE_{i}" for i in range(10)],
-    )
+    """Polars signature DataFrame with columns i (gene) and v (value), sorted descending."""
+    return pl.DataFrame({
+        "i": [f"GENE_{i}" for i in range(10)],
+        "v": [float(v) for v in range(10, 0, -1)],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -37,12 +43,12 @@ def sig_df_10():
 @pytest.fixture
 def medium_signature():
     """
-    200-gene signature as a two-column DataFrame (gene, value), values descending.
+    200-gene signature as a two-column polars DataFrame (gene, value), values descending.
     Genes GENE_0..GENE_19 are at the top (positive), GENE_180..GENE_199 at the bottom.
     """
     genes = [f"GENE_{i}" for i in range(200)]
     values = list(np.linspace(5.0, -5.0, 200))
-    return pd.DataFrame({"gene": genes, "value": values})
+    return pl.DataFrame({"gene": genes, "value": values})
 
 
 @pytest.fixture

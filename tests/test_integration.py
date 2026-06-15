@@ -7,7 +7,7 @@ deterministic.
 """
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import pytest
 
 import blitzgsea
@@ -23,7 +23,7 @@ _GSEA_KWARGS = dict(
     progress=False,
 )
 
-EXPECTED_COLUMNS = {"es", "nes", "pval", "sidak", "fdr", "geneset_size", "leading_edge"}
+EXPECTED_COLUMNS = {"Term", "es", "nes", "pval", "sidak", "fdr", "geneset_size", "leading_edge"}
 
 
 # ---------------------------------------------------------------------------
@@ -33,20 +33,21 @@ EXPECTED_COLUMNS = {"es", "nes", "pval", "sidak", "fdr", "geneset_size", "leadin
 class TestOutputStructure:
     def test_returns_dataframe(self, medium_signature, synthetic_library):
         result = blitzgsea.gsea(medium_signature, synthetic_library, **_GSEA_KWARGS)
-        assert isinstance(result, pd.DataFrame)
+        assert isinstance(result, pl.DataFrame)
 
     def test_has_expected_columns(self, medium_signature, synthetic_library):
         result = blitzgsea.gsea(medium_signature, synthetic_library, **_GSEA_KWARGS)
         assert set(result.columns) == EXPECTED_COLUMNS
 
-    def test_index_name_is_term(self, medium_signature, synthetic_library):
+    def test_term_is_a_column(self, medium_signature, synthetic_library):
         result = blitzgsea.gsea(medium_signature, synthetic_library, **_GSEA_KWARGS)
-        assert result.index.name == "Term"
+        assert "Term" in result.columns
 
     def test_all_library_keys_present_in_result(self, medium_signature, synthetic_library):
         result = blitzgsea.gsea(medium_signature, synthetic_library, **_GSEA_KWARGS)
+        terms = result["Term"].to_list()
         for key in synthetic_library:
-            assert key in result.index
+            assert key in terms
 
     def test_row_count_matches_valid_sets(self, medium_signature, synthetic_library):
         # All three synthetic sets have ≥ min_size genes, so all three should appear.
@@ -81,11 +82,10 @@ class TestColumnValues:
 
     def test_geneset_size_positive_int(self):
         assert (self.result["geneset_size"] > 0).all()
-        assert self.result["geneset_size"].dtype in (int, np.int64, np.int32)
+        assert self.result["geneset_size"].dtype in (pl.Int32, pl.Int64)
 
     def test_leading_edge_is_string(self):
-        import pandas as pd
-        assert pd.api.types.is_string_dtype(self.result["leading_edge"])
+        assert self.result["leading_edge"].dtype == pl.String
 
 
 # ---------------------------------------------------------------------------
@@ -97,18 +97,20 @@ class TestEnrichmentDirection:
     def _result(self, medium_signature, synthetic_library):
         self.result = blitzgsea.gsea(medium_signature, synthetic_library, **_GSEA_KWARGS)
 
+    def _get(self, term, col):
+        return self.result.filter(pl.col("Term") == term)[col][0]
+
     def test_top_set_has_positive_es(self):
-        assert self.result.loc["top_set", "es"] > 0
+        assert self._get("top_set", "es") > 0
 
     def test_bottom_set_has_negative_es(self):
-        assert self.result.loc["bottom_set", "es"] < 0
+        assert self._get("bottom_set", "es") < 0
 
     def test_nes_sign_matches_es_sign(self):
-        for term in self.result.index:
-            es = self.result.loc[term, "es"]
-            nes = self.result.loc[term, "nes"]
-            assert np.sign(es) == np.sign(nes), (
-                f"ES and NES have different signs for {term}: es={es}, nes={nes}"
+        for row in self.result.iter_rows(named=True):
+            assert np.sign(row["es"]) == np.sign(row["nes"]), (
+                f"ES and NES have different signs for {row['Term']}: "
+                f"es={row['es']}, nes={row['nes']}"
             )
 
 
@@ -117,18 +119,21 @@ class TestEnrichmentDirection:
 # ---------------------------------------------------------------------------
 
 class TestGeneSetSize:
+    def _get_size(self, result, term):
+        return result.filter(pl.col("Term") == term)["geneset_size"][0]
+
     def test_top_set_size(self, medium_signature, synthetic_library):
         result = blitzgsea.gsea(medium_signature, synthetic_library, **_GSEA_KWARGS)
-        assert result.loc["top_set", "geneset_size"] == 20
+        assert self._get_size(result, "top_set") == 20
 
     def test_bottom_set_size(self, medium_signature, synthetic_library):
         result = blitzgsea.gsea(medium_signature, synthetic_library, **_GSEA_KWARGS)
-        assert result.loc["bottom_set", "geneset_size"] == 20
+        assert self._get_size(result, "bottom_set") == 20
 
     def test_random_set_size(self, medium_signature, synthetic_library):
         result = blitzgsea.gsea(medium_signature, synthetic_library, **_GSEA_KWARGS)
         expected = len(range(0, 200, 13))  # 16 genes
-        assert result.loc["random_set", "geneset_size"] == expected
+        assert self._get_size(result, "random_set") == expected
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +143,7 @@ class TestGeneSetSize:
 class TestSorting:
     def test_sorted_by_pval_ascending(self, medium_signature, synthetic_library):
         result = blitzgsea.gsea(medium_signature, synthetic_library, **_GSEA_KWARGS)
-        pvals = list(result["pval"].abs())
+        pvals = result["pval"].abs().to_list()
         assert pvals == sorted(pvals)
 
 
@@ -150,7 +155,7 @@ class TestDeterminism:
     def test_same_seed_gives_identical_results(self, medium_signature, synthetic_library):
         r1 = blitzgsea.gsea(medium_signature, synthetic_library, **_GSEA_KWARGS)
         r2 = blitzgsea.gsea(medium_signature, synthetic_library, **_GSEA_KWARGS)
-        pd.testing.assert_frame_equal(r1, r2)
+        assert r1.equals(r2)
 
     def test_disabling_cache_still_gives_finite_pvals(self, medium_signature, synthetic_library):
         import blitzgsea as blitz
@@ -159,7 +164,7 @@ class TestDeterminism:
             medium_signature, synthetic_library,
             **{**_GSEA_KWARGS, "signature_cache": False}
         )
-        assert result["pval"].between(0, 1).all()
+        assert result["pval"].is_between(0, 1).all()
 
 
 # ---------------------------------------------------------------------------
@@ -175,8 +180,9 @@ class TestSizeFiltering:
         result = blitzgsea.gsea(
             medium_signature, library, **{**_GSEA_KWARGS, "min_size": 5}
         )
-        assert "big" in result.index
-        assert "tiny" not in result.index
+        terms = result["Term"].to_list()
+        assert "big" in terms
+        assert "tiny" not in terms
 
     def test_max_size_excludes_large_sets(self, medium_signature):
         library = {
@@ -186,8 +192,9 @@ class TestSizeFiltering:
         result = blitzgsea.gsea(
             medium_signature, library, **{**_GSEA_KWARGS, "max_size": 20}
         )
-        assert "small" in result.index
-        assert "huge" not in result.index
+        terms = result["Term"].to_list()
+        assert "small" in terms
+        assert "huge" not in terms
 
 
 # ---------------------------------------------------------------------------
@@ -208,4 +215,4 @@ class TestSignatureCache:
             medium_signature, synthetic_library,
             **{**_GSEA_KWARGS, "signature_cache": True}
         )
-        pd.testing.assert_frame_equal(r1, r2)
+        assert r1.equals(r2)

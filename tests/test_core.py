@@ -1,7 +1,7 @@
 """Tests for the core algorithm functions in blitzgsea/__init__.py."""
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import pytest
 
 import blitzgsea
@@ -165,32 +165,32 @@ class TestEnrichmentScoreNull:
 # ---------------------------------------------------------------------------
 
 class TestGetLeadingEdge:
-    def test_positive_es_returns_genes_before_peak(self, abs_sig_10, sig_map_10, sig_df_10):
+    def test_positive_es_returns_genes_before_peak(self, abs_sig_10, sig_map_10, gene_names_10):
         # Top-3 gene set → peak at index 2, leading edge = genes at indices 0 and 1
         rs, _ = blitzgsea.enrichment_score(
             abs_sig_10, sig_map_10, {"GENE_0", "GENE_1", "GENE_2"}
         )
         le = blitzgsea.get_leading_edge(
-            rs, sig_df_10, ["GENE_0", "GENE_1", "GENE_2"], sig_map_10
+            rs, gene_names_10, ["GENE_0", "GENE_1", "GENE_2"], sig_map_10
         )
         assert set(le.split(",")) == {"GENE_0", "GENE_1"}
 
-    def test_negative_es_returns_genes_after_trough(self, abs_sig_10, sig_map_10, sig_df_10):
+    def test_negative_es_returns_genes_after_trough(self, abs_sig_10, sig_map_10, gene_names_10):
         # Bottom-3 gene set → trough at index 6, leading edge = genes at indices 7,8,9
         rs, _ = blitzgsea.enrichment_score(
             abs_sig_10, sig_map_10, {"GENE_7", "GENE_8", "GENE_9"}
         )
         le = blitzgsea.get_leading_edge(
-            rs, sig_df_10, ["GENE_7", "GENE_8", "GENE_9"], sig_map_10
+            rs, gene_names_10, ["GENE_7", "GENE_8", "GENE_9"], sig_map_10
         )
         assert set(le.split(",")) == {"GENE_7", "GENE_8", "GENE_9"}
 
-    def test_returns_string(self, abs_sig_10, sig_map_10, sig_df_10):
+    def test_returns_string(self, abs_sig_10, sig_map_10, gene_names_10):
         rs, _ = blitzgsea.enrichment_score(
             abs_sig_10, sig_map_10, {"GENE_0", "GENE_1"}
         )
         le = blitzgsea.get_leading_edge(
-            rs, sig_df_10, ["GENE_0", "GENE_1"], sig_map_10
+            rs, gene_names_10, ["GENE_0", "GENE_1"], sig_map_10
         )
         assert isinstance(le, str)
 

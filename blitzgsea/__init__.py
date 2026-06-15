@@ -1,6 +1,6 @@
 import random
 import numpy as np
-import pandas as pd
+import polars as pl
 from statsmodels.nonparametric.smoothers_lowess import lowess
 from scipy import interpolate
 
@@ -111,7 +111,7 @@ def enrichment_score_null(abs_signature, hit_indicator, number_hits):
     return running_sum[peak]
 
 
-def get_leading_edge(runningsum, signature, gene_set, signature_map):
+def get_leading_edge(runningsum, gene_names, gene_set, signature_map):
     gs = set(gene_set)
     hits = [signature_map[x] for x in gs if x in signature_map]
     rmax = np.argmax(runningsum)
@@ -120,7 +120,7 @@ def get_leading_edge(runningsum, signature, gene_set, signature_map):
         lgenes = set(hits).intersection(range(rmax))
     else:
         lgenes = set(hits).intersection(range(rmin, len(runningsum)))
-    return ",".join(signature.index[list(lgenes)])
+    return ",".join(gene_names[p] for p in sorted(lgenes))
 
 
 def get_peak_size_adv(abs_signature, number_hits, permutations, seed):
@@ -205,7 +205,7 @@ def loess_interpolation(x, y, frac=0.6, it=4):
     return interpolate.interp1d(x, yout, bounds_error=False, fill_value="extrapolate")
 
 
-def _score_gene_set(abs_signature, signature_map, gene_set, signature):
+def _score_gene_set(abs_signature, signature_map, gene_set, gene_names):
     """O(K) enrichment score and leading edge for a single gene set.
 
     Replaces the enrichment_score() + get_leading_edge() pair in the main
@@ -250,10 +250,10 @@ def _score_gene_set(abs_signature, signature_map, gene_set, signature):
     else:
         lgenes = [p for p in hits_sorted if p >= peak_dense]
 
-    return es, ",".join(signature.index[lgenes])
+    return es, ",".join(gene_names[p] for p in lgenes)
 
 
-def estimate_parameters(signature, abs_signature, signature_map, library, permutations: int = 2000, max_size=4000, symmetric: bool = False, calibration_anchors: int = 40, plotting: bool = False, processes=4, verbose=False, progress=False, seed: int = 0, ks_disable=False):
+def estimate_parameters(abs_signature, library, permutations: int = 2000, max_size=4000, symmetric: bool = False, calibration_anchors: int = 40, plotting: bool = False, processes=4, verbose=False, progress=False, seed: int = 0, ks_disable=False):
     max_ll = int(np.max([len(v) for v in library.values()]))
 
     # Log-spaced anchors give dense coverage of small gene sets where the
@@ -323,7 +323,7 @@ def estimate_parameters(signature, abs_signature, signature_map, library, permut
 
 
 def clean_library(library, signature):
-    valid_elements = set(signature.index)
+    valid_elements = set(signature["i"].to_list())
     return {key: gene_set & valid_elements for key, gene_set in library.items()}
 
 
@@ -333,7 +333,7 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
 
     Parameters
     ----------
-    signature : pd.DataFrame
+    signature : pl.DataFrame
         Two-column DataFrame (gene ID, numeric value).
     library : dict
         Mapping of gene set name to list of gene IDs.
@@ -358,14 +358,15 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
 
     Returns
     -------
-    pd.DataFrame
-        Columns: es, nes, pval, sidak, fdr, geneset_size, leading_edge; indexed by Term.
+    pl.DataFrame
+        Columns: Term, es, nes, pval, sidak, fdr, geneset_size, leading_edge.
     """
     if seed == -1:
         seed = random.randint(-10000000, 100000000)
 
-    signature = signature.copy()
-    signature.columns = ["i", "v"]
+    # Normalise column names
+    cols = signature.columns
+    signature = signature.rename({cols[0]: "i", cols[1]: "v"})
 
     if permutations < 1000 and not symmetric:
         if verbose:
@@ -378,23 +379,35 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
 
     random.seed(seed)
     np.random.seed(seed)
-    # tobytes() is O(N) C-level copy — ~100x faster than to_string() for large signatures.
-    sig_hash = hash(signature.iloc[:, 1].values.astype(np.float64).tobytes()
-                    + ",".join(map(str, signature.iloc[:, 0])).encode())
+
+    # Stable hash of the raw input — tobytes() is a C-level memcpy, much
+    # faster than string-formatting the whole DataFrame.
+    sig_hash = hash(
+        signature["v"].to_numpy().astype(np.float64).tobytes()
+        + ",".join(signature["i"].to_list()).encode()
+    )
 
     if add_noise:
-        signature.iloc[:, 1] += np.random.normal(signature.shape[0]) / (np.mean(np.abs(signature.iloc[:, 1])) * 100000)
+        noise = np.random.normal(len(signature)) / (signature["v"].abs().mean() * 100000)
+        signature = signature.with_columns((pl.col("v") + noise).alias("v"))
 
-    signature = signature.sort_values("v", ascending=False).set_index("i")
-    signature = signature[~signature.index.duplicated(keep='first')]
+    # Sort descending, deduplicate on gene ID keeping first (highest-ranked).
+    signature = (
+        signature
+        .sort("v", descending=True)
+        .unique(subset=["i"], keep="first", maintain_order=True)
+    )
     library = {key: set(value) for key, value in library.items()}
     library = clean_library(library, signature)
 
     if center:
-        signature.loc[:, "v"] -= np.mean(signature.loc[:, "v"])
+        signature = signature.with_columns(
+            (pl.col("v") - pl.col("v").mean()).alias("v")
+        )
 
-    abs_signature = np.abs(signature.loc[:, "v"].to_numpy())
-    signature_map = {h: i for i, h in enumerate(signature.index)}
+    gene_names: list = signature["i"].to_list()
+    abs_signature = signature["v"].abs().to_numpy()
+    signature_map = {gene: idx for idx, gene in enumerate(gene_names)}
 
     if shared_null and len(pdf_cache) > 0:
         kld, sig_hash_temp = best_kl_fit(signature["v"].to_numpy(), pdf_cache, bins=kl_bins)
@@ -411,7 +424,7 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
         f_alpha_pos, f_beta_pos, f_pos_ratio, f_alpha_neg, f_beta_neg, ks_pos, ks_neg = pdf_cache[sig_hash]["model"]
     else:
         f_alpha_pos, f_beta_pos, f_pos_ratio, f_alpha_neg, f_beta_neg, ks_pos, ks_neg = estimate_parameters(
-            signature, abs_signature, signature_map, library,
+            abs_signature, library,
             permutations=permutations, calibration_anchors=anchors,
             processes=processes, symmetric=symmetric, plotting=plotting,
             verbose=verbose, seed=seed, progress=progress,
@@ -424,7 +437,7 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
             "model": (f_alpha_pos, f_beta_pos, f_pos_ratio, f_alpha_neg, f_beta_neg, ks_pos, ks_neg),
         }
 
-    signature_genes = set(signature.index)
+    signature_genes = set(gene_names)
     gsets, ess, pvals, ness, set_size, legeness = [], [], [], [], [], []
 
     # Set mpmath precision once for the scoring loop
@@ -438,7 +451,7 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
 
         gsets.append(k)
         gsize = len(stripped_set)
-        es, legenes = _score_gene_set(abs_signature, signature_map, stripped_set, signature)
+        es, legenes = _score_gene_set(abs_signature, signature_map, stripped_set, gene_names)
 
         pos_alpha = f_alpha_pos(gsize)
         pos_beta = f_beta_pos(gsize)
@@ -481,22 +494,22 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
         np.seterr(divide='ignore')
 
     if len(pvals) > 1:
-        fdr_values = multipletests(pvals, method="fdr_bh")[1]
-        sidak_values = multipletests(pvals, method="sidak")[1]
+        fdr_values = multipletests(pvals, method="fdr_bh")[1].tolist()
+        sidak_values = multipletests(pvals, method="sidak")[1].tolist()
     else:
         fdr_values = pvals
         sidak_values = pvals
 
-    res = pd.DataFrame({
+    res = pl.DataFrame({
         "Term": gsets,
-        "es": np.array(ess, dtype=float),
-        "nes": np.array(ness, dtype=float),
-        "pval": np.array(pvals, dtype=float),
-        "sidak": np.array(sidak_values, dtype=float),
-        "fdr": np.array(fdr_values, dtype=float),
-        "geneset_size": np.array(set_size, dtype=int),
+        "es": ess,
+        "nes": ness,
+        "pval": pvals,
+        "sidak": sidak_values,
+        "fdr": fdr_values,
+        "geneset_size": set_size,
         "leading_edge": legeness,
-    }).set_index("Term")
+    })
 
     if (ks_pos < 0.05 or ks_neg < 0.05) and verbose:
         print(
@@ -504,4 +517,4 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
             f'KS p-value (pos): {ks_pos}\nKS p-value (neg): {ks_neg}'
         )
 
-    return res.sort_values("pval", key=abs, ascending=True)
+    return res.sort(pl.col("pval").abs())

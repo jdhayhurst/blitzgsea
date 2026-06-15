@@ -1,69 +1,78 @@
 import numpy as np
+import polars as pl
 from statsmodels.stats.multitest import multipletests
-import pandas as pd
+
 
 def gsea(exprs, library, groups, permutations=1000, seed=1):
+    """Phenotype-permutation GSEA.
 
-    pos = 0
-    neg = 1
+    Parameters
+    ----------
+    exprs : pl.DataFrame
+        Rows = genes.  First column holds gene IDs; remaining columns are
+        per-sample expression values.
+    library : dict
+        Gene set name → list of gene IDs.
+    groups : array-like of int
+        Sample group labels (0 = positive class, 1 = negative class).
+    """
+    gene_col = exprs.columns[0]
+    genes = np.array(exprs[gene_col].to_list())
+    expr_matrix = exprs.select(pl.all().exclude(gene_col)).to_numpy()  # (N_genes, N_samples)
+    expr_mat = expr_matrix.T                                            # (N_samples, N_genes)
 
     rs = np.random.RandomState(seed)
-    expr_mat = exprs.T
-    perm_cor_tensor = np.tile(expr_mat, (permutations,1,1))
-
-    perm_cor_tensor.shape
-    for arr in perm_cor_tensor[:-1]: rs.shuffle(arr)
+    perm_cor_tensor = np.tile(expr_mat, (permutations, 1, 1))
+    for arr in perm_cor_tensor[:-1]:
+        rs.shuffle(arr)
 
     groups = np.array(groups)
-    pos = groups == pos
-    neg = groups == neg
-    n_pos = np.sum(pos)
-    n_neg = np.sum(neg)
-    pos_cor_mean = perm_cor_tensor[:,pos,:].mean(axis=1)
-    neg_cor_mean = perm_cor_tensor[:,neg,:].mean(axis=1)
-    pos_cor_std = perm_cor_tensor[:,pos,:].std(axis=1, ddof=1)
-    neg_cor_std = perm_cor_tensor[:,neg,:].std(axis=1, ddof=1)
+    pos_mask = groups == 0
+    neg_mask = groups == 1
+    n_pos = int(pos_mask.sum())
+    n_neg = int(neg_mask.sum())
 
-    denom = np.sqrt((pos_cor_std**2)/n_pos  + (neg_cor_std**2)/n_neg)
-    cor_mat = (pos_cor_mean - neg_cor_mean)/ denom
+    pos_mean = perm_cor_tensor[:, pos_mask, :].mean(axis=1)
+    neg_mean = perm_cor_tensor[:, neg_mask, :].mean(axis=1)
+    pos_std = perm_cor_tensor[:, pos_mask, :].std(axis=1, ddof=1)
+    neg_std = perm_cor_tensor[:, neg_mask, :].std(axis=1, ddof=1)
 
-    cor_mat_ind = cor_mat.argsort()
-    gene_mat = cor_mat_ind[:, ::-1]
-    cor_mat = cor_mat[:, ::-1]
+    denom = np.sqrt(pos_std ** 2 / n_pos + neg_std ** 2 / n_neg)
+    cor_mat = (pos_mean - neg_mean) / denom
 
-    cor_mat = cor_mat.T
+    gene_mat = cor_mat.argsort()[:, ::-1]
+    cor_mat = cor_mat[:, ::-1].T
+
     keys = np.array(list(library.keys()))
+    tag_indicator = np.vstack([np.in1d(genes, library[key], assume_unique=True) for key in keys]).astype(int)
+    perm_tag_tensor = np.stack([tag.take(gene_mat).T for tag in tag_indicator], axis=0)
 
-    genes = np.array(exprs.index)
-    genes_ind = gene_mat
-
-    tag_indicator = np.vstack([np.in1d(genes, library[key], assume_unique=True) for key in keys])
-    tag_indicator = tag_indicator.astype(int)
-    perm_tag_tensor = np.stack([tag.take(genes_ind).T for tag in tag_indicator], axis=0)
-    
     no_tag_tensor = 1 - perm_tag_tensor
-    rank_alpha = np.abs(perm_tag_tensor*cor_mat[np.newaxis,:,:])
+    rank_alpha = np.abs(perm_tag_tensor * cor_mat[np.newaxis, :, :])
 
-    axis=1
-    P_GW_denominator = np.sum(rank_alpha, axis=axis, keepdims=True)
-    P_NG_denominator = np.sum(no_tag_tensor, axis=axis, keepdims=True)
-    REStensor = np.cumsum(rank_alpha / P_GW_denominator - no_tag_tensor / P_NG_denominator, axis=axis)
+    P_GW = rank_alpha.sum(axis=1, keepdims=True)
+    P_NG = no_tag_tensor.sum(axis=1, keepdims=True)
+    RES_tensor = np.cumsum(rank_alpha / P_GW - no_tag_tensor / P_NG, axis=1)
 
-    esmax, esmin = REStensor.max(axis=axis), REStensor.min(axis=axis)
-    esmatrix = np.where(np.abs(esmax) > np.abs(esmin), esmax, esmin)
+    es_max = RES_tensor.max(axis=1)
+    es_min = RES_tensor.min(axis=1)
+    es_matrix = np.where(np.abs(es_max) > np.abs(es_min), es_max, es_min)
 
-    es, esnull, RES = esmatrix[:,-1], esmatrix[:,:-1], REStensor[:,:,-1]
+    es = es_matrix[:, -1]
+    es_null = es_matrix[:, :-1]
 
-    condlist = [ es < 0, es >=0]
-    choicelist = [(esnull < es.reshape(len(es),1)).sum(axis=1)/ (esnull < 0).sum(axis=1),
-                (esnull >= es.reshape(len(es),1)).sum(axis=1)/ (esnull >= 0).sum(axis=1)]
-    
-    pvals = np.select(condlist, choicelist)
+    pvals = np.where(
+        es < 0,
+        (es_null < es.reshape(-1, 1)).sum(axis=1) / (es_null < 0).sum(axis=1),
+        (es_null >= es.reshape(-1, 1)).sum(axis=1) / (es_null >= 0).sum(axis=1),
+    )
     fdr_values = multipletests(pvals, method="fdr_bh")[1]
     sidak_values = multipletests(pvals, method="sidak")[1]
 
-    res =  pd.DataFrame([keys, np.array(es).astype("float"), np.array(pvals).astype("float"), np.array(fdr_values).astype("float"), np.array(sidak_values).astype("float")]).T
-    res.columns = ["Term", "es", "pval", "fdr", "sidak"]
-    res = res.set_index("Term")
-
-    return res.sort_values("pval")
+    return pl.DataFrame({
+        "Term": list(keys),
+        "es": es.astype(float).tolist(),
+        "pval": pvals.astype(float).tolist(),
+        "fdr": fdr_values.astype(float).tolist(),
+        "sidak": sidak_values.astype(float).tolist(),
+    }).sort("pval")
