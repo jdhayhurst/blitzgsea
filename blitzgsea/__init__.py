@@ -175,7 +175,7 @@ def estimate_parameters(signature, abs_signature, signature_map, library, permut
     anchor_set_sizes = [size for size in anchor_set_sizes if size < abs_signature_length]
 
     if processes == 1:
-        process_generator = (estimate_anchor(signature, abs_signature, signature_map, xx, permutations, symmetric, int(seed+xx)) for xx in anchor_set_sizes)
+        process_generator = (estimate_anchor(signature, abs_signature, signature_map, xx, permutations, symmetric, int(seed+xx), ks_disable) for xx in anchor_set_sizes)
         results = list(tqdm(process_generator, desc="Calibration", total=len(anchor_set_sizes), disable=not progress))
     else:
         with multiprocessing.Pool(processes) as pool:
