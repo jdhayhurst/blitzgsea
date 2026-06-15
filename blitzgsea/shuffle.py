@@ -3,7 +3,13 @@ import polars as pl
 from statsmodels.stats.multitest import multipletests
 
 
-def gsea(exprs, library, groups, permutations=1000, seed=1):
+def gsea(
+    exprs: pl.DataFrame,
+    library: dict[str, list[str]],
+    groups: list[int] | np.ndarray,
+    permutations: int = 1000,
+    seed: int = 1,
+) -> pl.DataFrame:
     """Phenotype-permutation GSEA.
 
     Parameters

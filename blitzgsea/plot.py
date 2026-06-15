@@ -2,10 +2,11 @@ import numpy as np
 import polars as pl
 from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
+from matplotlib.figure import Figure
 import blitzgsea as blitz
 
 
-def _prepare_signature(signature, center):
+def _prepare_signature(signature: pl.DataFrame, center: bool) -> pl.DataFrame:
     """Sort, dedup, optionally center; return polars DataFrame with cols i, v."""
     cols = signature.columns
     sig = signature.rename({cols[0]: "i", cols[1]: "v"})
@@ -15,12 +16,23 @@ def _prepare_signature(signature, center):
     return sig
 
 
-def _clean_library(library, signature):
+def _clean_library(
+    library: dict[str, set[str]],
+    signature: pl.DataFrame,
+) -> dict[str, set[str]]:
     valid = set(signature["i"].to_list())
     return {key: gene_set & valid for key, gene_set in library.items()}
 
 
-def running_sum(signature, geneset, library, result=None, compact=False, center=True, interactive_plot=False):
+def running_sum(
+    signature: pl.DataFrame,
+    geneset: str,
+    library: dict[str, list[str] | set[str]],
+    result: pl.DataFrame | None = None,
+    compact: bool = False,
+    center: bool = True,
+    interactive_plot: bool = False,
+) -> Figure:
     """Plot the enrichment running sum for one gene set."""
     if not interactive_plot:
         plt.ioff()
@@ -123,7 +135,14 @@ def running_sum(signature, geneset, library, result=None, compact=False, center=
     return fig
 
 
-def top_table(signature, library, result, n=10, center=True, interactive_plot=False):
+def top_table(
+    signature: pl.DataFrame,
+    library: dict[str, list[str] | set[str]],
+    result: pl.DataFrame,
+    n: int = 10,
+    center: bool = True,
+    interactive_plot: bool = False,
+) -> Figure:
     """Plot a summary table of the top N enriched gene sets."""
     if not interactive_plot:
         plt.ioff()

@@ -1,36 +1,36 @@
+import multiprocessing
 import random
+
 import numpy as np
 import polars as pl
-from statsmodels.nonparametric.smoothers_lowess import lowess
-from scipy import interpolate
-
 from matplotlib import pyplot as plt
-from tqdm import tqdm
-from statsmodels.stats.multitest import multipletests
-import multiprocessing
-
 from mpmath import mp
+from scipy import interpolate
+from scipy.stats import gamma, kstest
+from statsmodels.nonparametric.smoothers_lowess import lowess
+from statsmodels.stats.multitest import multipletests
+from tqdm import tqdm
 
-from scipy.stats import gamma
-from scipy.stats import kstest
-
-from blitzgsea.signature_similarity import create_pdf, best_kl_fit
 from blitzgsea.mpsci import gammacdf, invcdf
-import blitzgsea.enrichr
-import blitzgsea.plot
-import blitzgsea.shuffle
-import blitzgsea.signature_similarity
+from blitzgsea.signature_similarity import best_kl_fit, create_pdf
 
 mp.dps = 1000
 mp.prec = 1000
 pdf_cache: dict = {}
 
 
-def estimate_anchor_star(args):
+def estimate_anchor_star(args: tuple) -> tuple[float, float, float, float, float, float, float]:
     return estimate_anchor(*args)
 
 
-def estimate_anchor(abs_signature, set_size, permutations, symmetric, seed, ks_disable):
+def estimate_anchor(
+    abs_signature: np.ndarray,
+    set_size: int,
+    permutations: int,
+    symmetric: bool,
+    seed: int,
+    ks_disable: bool,
+) -> tuple[float, float, float, float, float, float, float]:
     es = np.array(get_peak_size_adv(abs_signature, set_size, permutations, int(seed)))
 
     pos = es[es > 0]
@@ -47,7 +47,7 @@ def estimate_anchor(abs_signature, set_size, permutations, symmetric, seed, ks_d
             ks_pos = 1
             ks_neg = 1
         else:
-            ks_pos = kstest(aes, 'gamma', args=(fit_alpha, fit_loc, fit_beta))[1]
+            ks_pos = kstest(aes, "gamma", args=(fit_alpha, fit_loc, fit_beta))[1]
             ks_neg = ks_pos
 
         alpha_pos = fit_alpha
@@ -59,13 +59,15 @@ def estimate_anchor(abs_signature, set_size, permutations, symmetric, seed, ks_d
         ks_pos = 1
         ks_neg = 1
         if not ks_disable:
-            ks_pos = kstest(pos, 'gamma', args=(fit_alpha, fit_loc, fit_beta))[1]
+            ks_pos = kstest(pos, "gamma", args=(fit_alpha, fit_loc, fit_beta))[1]
         alpha_pos = fit_alpha
         beta_pos = fit_beta
 
         fit_alpha, fit_loc, fit_beta = gamma.fit(-np.array(neg), floc=0)
         if not ks_disable:
-            ks_neg = kstest(-np.array(neg), 'gamma', args=(fit_alpha, fit_loc, fit_beta))[1]
+            ks_neg = kstest(
+                -np.array(neg), "gamma", args=(fit_alpha, fit_loc, fit_beta)
+            )[1]
         alpha_neg = fit_alpha
         beta_neg = fit_beta
 
@@ -74,11 +76,15 @@ def estimate_anchor(abs_signature, set_size, permutations, symmetric, seed, ks_d
     return alpha_pos, beta_pos, ks_pos, alpha_neg, beta_neg, ks_neg, pos_ratio
 
 
-def strip_gene_set(signature_genes, gene_set):
+def strip_gene_set(signature_genes: set[str], gene_set: list[str] | set[str]) -> list[str]:
     return [x for x in gene_set if x in signature_genes]
 
 
-def enrichment_score(abs_signature, signature_map, gene_set):
+def enrichment_score(
+    abs_signature: np.ndarray,
+    signature_map: dict[str, int],
+    gene_set: set[str] | list[str],
+) -> tuple[np.ndarray, float]:
     hits = [signature_map[x] for x in gene_set if x in signature_map]
     hit_indicator = np.zeros(len(abs_signature))
     hit_indicator[hits] = 1
@@ -96,7 +102,11 @@ def enrichment_score(abs_signature, signature_map, gene_set):
     return running_sum, es
 
 
-def enrichment_score_null(abs_signature, hit_indicator, number_hits):
+def enrichment_score_null(
+    abs_signature: np.ndarray,
+    hit_indicator: np.ndarray,
+    number_hits: int,
+) -> float:
     """Single-permutation ES used by external callers; kept for backward compatibility."""
     hits = np.random.choice(len(abs_signature), size=number_hits, replace=False)
     hit_indicator_new = np.zeros(len(abs_signature), dtype=np.float32)
@@ -105,13 +115,20 @@ def enrichment_score_null(abs_signature, hit_indicator, number_hits):
     sum_hit_scores = np.sum(abs_signature[hits])
     norm_hit = 1.0 / sum_hit_scores
     norm_no_hit = 1.0 / number_miss
-    increment = hit_indicator_new * (abs_signature * norm_hit + norm_no_hit) - norm_no_hit
+    increment = (
+        hit_indicator_new * (abs_signature * norm_hit + norm_no_hit) - norm_no_hit
+    )
     running_sum = np.cumsum(increment, dtype=np.float32)
     peak = np.abs(running_sum).argmax()
     return running_sum[peak]
 
 
-def get_leading_edge(runningsum, gene_names, gene_set, signature_map):
+def get_leading_edge(
+    runningsum: np.ndarray,
+    gene_names: list[str],
+    gene_set: list[str] | set[str],
+    signature_map: dict[str, int],
+) -> str:
     gs = set(gene_set)
     hits = [signature_map[x] for x in gs if x in signature_map]
     rmax = np.argmax(runningsum)
@@ -123,7 +140,12 @@ def get_leading_edge(runningsum, gene_names, gene_set, signature_map):
     return ",".join(gene_names[p] for p in sorted(lgenes))
 
 
-def get_peak_size_adv(abs_signature, number_hits, permutations, seed):
+def get_peak_size_adv(
+    abs_signature: np.ndarray,
+    number_hits: int,
+    permutations: int,
+    seed: int,
+) -> list[float]:
     """
     Generate null-distribution ES values via O(K) sparse sampling.
 
@@ -173,14 +195,14 @@ def get_peak_size_adv(abs_signature, number_hits, permutations, seed):
 
         # O(K) sparse ES formula.
         # hs is sorted ascending; ah[b,k] = abs_signature[hs[b,k]].
-        ah = abs_sig_f32[hs]          # (batch, K) — hit absolute values
-        ca = np.cumsum(ah, axis=1)    # (batch, K) — cumulative hit weight up to k-th hit
+        ah = abs_sig_f32[hs]  # (batch, K) — hit absolute values
+        ca = np.cumsum(ah, axis=1)  # (batch, K) — cumulative hit weight up to k-th hit
         nh = np.float32(1.0) / ca[:, -1:]  # (batch, 1) — 1 / total hit weight
 
         # gap[b,k] = number of miss positions before the k-th hit = hs[b,k] - k
-        gap = hs.astype(np.float32) - k_idx                  # (batch, K)
-        val_at_hit = ca * nh - gap * norm_no_hit             # running sum after k-th hit
-        val_before_hit = val_at_hit - ah * nh                # running sum just before k-th hit
+        gap = hs.astype(np.float32) - k_idx  # (batch, K)
+        val_at_hit = ca * nh - gap * norm_no_hit  # running sum after k-th hit
+        val_before_hit = val_at_hit - ah * nh  # running sum just before k-th hit
 
         # Peak ES = candidate with largest absolute running sum across 2K points
         abs_at = np.abs(val_at_hit)
@@ -200,12 +222,22 @@ def get_peak_size_adv(abs_signature, number_hits, permutations, seed):
     return np.concatenate(es_chunks).tolist()
 
 
-def loess_interpolation(x, y, frac=0.6, it=4):
+def loess_interpolation(
+    x: np.ndarray,
+    y: np.ndarray | list,
+    frac: float = 0.6,
+    it: int = 4,
+) -> interpolate.interp1d:
     yout = lowess(y, x, frac=frac)[:, 1]
     return interpolate.interp1d(x, yout, bounds_error=False, fill_value="extrapolate")
 
 
-def _score_gene_set(abs_signature, signature_map, gene_set, gene_names):
+def _score_gene_set(
+    abs_signature: np.ndarray,
+    signature_map: dict[str, int],
+    gene_set: list[str] | set[str],
+    gene_names: list[str],
+) -> tuple[float, str]:
     """O(K) enrichment score and leading edge for a single gene set.
 
     Replaces the enrichment_score() + get_leading_edge() pair in the main
@@ -219,8 +251,8 @@ def _score_gene_set(abs_signature, signature_map, gene_set, gene_names):
 
     N = len(abs_signature)
     hs = np.array(hits_sorted, dtype=np.int64)
-    ah = abs_signature[hs]          # hit absolute values (float64 for accuracy)
-    ca = np.cumsum(ah)              # cumulative hit weight
+    ah = abs_signature[hs]  # hit absolute values (float64 for accuracy)
+    ca = np.cumsum(ah)  # cumulative hit weight
     total = ca[-1]
     if total == 0.0:
         return 0.0, ""
@@ -229,7 +261,7 @@ def _score_gene_set(abs_signature, signature_map, gene_set, gene_names):
     norm_no_hit = 1.0 / (N - K)
     k_idx = np.arange(K, dtype=np.float64)
 
-    gap = hs.astype(np.float64) - k_idx      # miss positions before each hit
+    gap = hs.astype(np.float64) - k_idx  # miss positions before each hit
     val_at_hit = ca * norm_hit - gap * norm_no_hit
     val_before_hit = val_at_hit - ah * norm_hit
 
@@ -253,7 +285,20 @@ def _score_gene_set(abs_signature, signature_map, gene_set, gene_names):
     return es, ",".join(gene_names[p] for p in lgenes)
 
 
-def estimate_parameters(abs_signature, library, permutations: int = 2000, max_size=4000, symmetric: bool = False, calibration_anchors: int = 40, plotting: bool = False, processes=4, verbose=False, progress=False, seed: int = 0, ks_disable=False):
+def estimate_parameters(
+    abs_signature: np.ndarray,
+    library: dict[str, set[str]],
+    permutations: int = 2000,
+    max_size: int = 4000,
+    symmetric: bool = False,
+    calibration_anchors: int = 40,
+    plotting: bool = False,
+    processes: int = 4,
+    verbose: bool = False,
+    progress: bool = False,
+    seed: int = 0,
+    ks_disable: bool = False,
+) -> tuple[interpolate.interp1d, interpolate.interp1d, interpolate.interp1d, interpolate.interp1d, interpolate.interp1d, float, float]:
     max_ll = int(np.max([len(v) for v in library.values()]))
 
     # Log-spaced anchors give dense coverage of small gene sets where the
@@ -265,24 +310,33 @@ def estimate_parameters(abs_signature, library, permutations: int = 2000, max_si
     anchor_set_sizes = [s for s in anchor_set_sizes if 0 < s < len(abs_signature)]
 
     if processes == 1:
-        process_generator = (
-            estimate_anchor(abs_signature, xx, permutations, symmetric, int(seed + xx), ks_disable)
+        results = list(
+            estimate_anchor(
+                abs_signature, xx, permutations, symmetric, int(seed + xx), ks_disable
+            )
             for xx in anchor_set_sizes
         )
-        results = list(tqdm(process_generator, desc="Calibration", total=len(anchor_set_sizes), disable=not progress))
     else:
         with multiprocessing.Pool(processes) as pool:
             args = [
                 (abs_signature, xx, permutations, symmetric, int(seed + xx), ks_disable)
                 for xx in anchor_set_sizes
             ]
-            results = list(tqdm(pool.imap(estimate_anchor_star, args), desc="Calibration", total=len(args), disable=not progress))
+            results = list(pool.imap(estimate_anchor_star, args))
 
     alpha_pos, beta_pos, ks_pos_vals = [], [], []
     alpha_neg, beta_neg, ks_neg_vals = [], [], []
     pos_ratio = []
 
-    for f_alpha_pos, f_beta_pos, f_ks_pos, f_alpha_neg, f_beta_neg, f_ks_neg, f_pos_ratio in results:
+    for (
+        f_alpha_pos,
+        f_beta_pos,
+        f_ks_pos,
+        f_alpha_neg,
+        f_beta_neg,
+        f_ks_neg,
+        f_pos_ratio,
+    ) in results:
         alpha_pos.append(f_alpha_pos)
         beta_pos.append(f_beta_pos)
         ks_pos_vals.append(f_ks_pos)
@@ -292,7 +346,9 @@ def estimate_parameters(abs_signature, library, permutations: int = 2000, max_si
         pos_ratio.append(f_pos_ratio)
 
     if np.max(pos_ratio) > 1.5 and verbose:
-        print('Significant unbalance between positive and negative enrichment scores detected.')
+        print(
+            "Significant unbalance between positive and negative enrichment scores detected."
+        )
 
     anchor_set_sizes = np.array(anchor_set_sizes, dtype=float)
 
@@ -307,27 +363,60 @@ def estimate_parameters(abs_signature, library, permutations: int = 2000, max_si
 
     if plotting:
         xx = np.linspace(min(anchor_set_sizes), max(anchor_set_sizes), 1000)
-        for fig_idx, (label, ydata, ysmooth) in enumerate([
-            ("alpha pos", alpha_pos, f_alpha_pos(xx)),
-            ("alpha neg", alpha_neg, f_alpha_neg(xx)),
-            ("beta pos", beta_pos, f_beta_pos(xx)),
-            ("beta neg", beta_neg, f_beta_neg(xx)),
-            ("pos ratio", pos_ratio, f_pos_ratio(xx)),
-        ], 1):
+        for fig_idx, (label, ydata, ysmooth) in enumerate(
+            [
+                ("alpha pos", alpha_pos, f_alpha_pos(xx)),
+                ("alpha neg", alpha_neg, f_alpha_neg(xx)),
+                ("beta pos", beta_pos, f_beta_pos(xx)),
+                ("beta neg", beta_neg, f_beta_neg(xx)),
+                ("pos ratio", pos_ratio, f_pos_ratio(xx)),
+            ],
+            1,
+        ):
             plt.figure(fig_idx)
-            plt.plot(xx, ysmooth, '--', lw=3)
-            plt.plot(anchor_set_sizes, ydata, 'o')
+            plt.plot(xx, ysmooth, "--", lw=3)
+            plt.plot(anchor_set_sizes, ydata, "o")
             plt.title(label)
 
-    return f_alpha_pos, f_beta_pos, f_pos_ratio, f_alpha_neg, f_beta_neg, np.mean(ks_pos_vals), np.mean(ks_neg_vals)
+    return (
+        f_alpha_pos,
+        f_beta_pos,
+        f_pos_ratio,
+        f_alpha_neg,
+        f_beta_neg,
+        np.mean(ks_pos_vals),
+        np.mean(ks_neg_vals),
+    )
 
 
-def clean_library(library, signature):
+def clean_library(library: dict[str, set[str]], signature: pl.DataFrame) -> dict[str, set[str]]:
     valid_elements = set(signature["i"].to_list())
     return {key: gene_set & valid_elements for key, gene_set in library.items()}
 
 
-def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_size: int = 5, max_size: int = 4000, processes: int = 4, plotting: bool = False, verbose: bool = False, progress: bool = False, symmetric: bool = False, signature_cache: bool = True, kl_threshold: float = 0.3, kl_bins: int = 200, shared_null: bool = False, seed: int = 0, add_noise: bool = False, accuracy: int = 40, deep_accuracy: int = 50, center=True, ks_disable=False):
+def gsea(
+    signature: pl.DataFrame,
+    library: dict[str, list[str]],
+    permutations: int = 1000,
+    anchors: int = 40,
+    min_size: int = 5,
+    max_size: int = 4000,
+    processes: int = 4,
+    plotting: bool = False,
+    verbose: bool = False,
+    progress: bool = False,
+    symmetric: bool = False,
+    signature_cache: bool = True,
+    kl_threshold: float = 0.3,
+    kl_bins: int = 200,
+    shared_null: bool = False,
+    seed: int = 0,
+    add_noise: bool = False,
+    accuracy: int = 40,
+    deep_accuracy: int = 50,
+    center: bool = True,
+    ks_disable: bool = False,
+) -> pl.DataFrame:
     """
     Perform Gene Set Enrichment Analysis (GSEA) on the given signature and library.
 
@@ -370,11 +459,11 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
 
     if permutations < 1000 and not symmetric:
         if verbose:
-            print('Low number of permutations: enabling symmetric Gamma for accuracy.')
+            print("Low number of permutations: enabling symmetric Gamma for accuracy.")
         symmetric = True
     elif permutations < 500:
         if verbose:
-            print('Low number of permutations may lead to inaccurate p-values.')
+            print("Low number of permutations may lead to inaccurate p-values.")
         symmetric = True
 
     random.seed(seed)
@@ -388,14 +477,14 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
     )
 
     if add_noise:
-        noise = np.random.normal(len(signature)) / (signature["v"].abs().mean() * 100000)
+        noise = np.random.normal(len(signature)) / (
+            signature["v"].abs().mean() * 100000
+        )
         signature = signature.with_columns((pl.col("v") + noise).alias("v"))
 
     # Sort descending, deduplicate on gene ID keeping first (highest-ranked).
-    signature = (
-        signature
-        .sort("v", descending=True)
-        .unique(subset=["i"], keep="first", maintain_order=True)
+    signature = signature.sort("v", descending=True).unique(
+        subset=["i"], keep="first", maintain_order=True
     )
     library = {key: set(value) for key, value in library.items()}
     library = clean_library(library, signature)
@@ -410,31 +499,66 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
     signature_map = {gene: idx for idx, gene in enumerate(gene_names)}
 
     if shared_null and len(pdf_cache) > 0:
-        kld, sig_hash_temp = best_kl_fit(signature["v"].to_numpy(), pdf_cache, bins=kl_bins)
+        kld, sig_hash_temp = best_kl_fit(
+            signature["v"].to_numpy(), pdf_cache, bins=kl_bins
+        )
         if kld < kl_threshold:
             sig_hash = sig_hash_temp
             if verbose:
                 print(f"Found compatible null model. Best KL-divergence: {kld}")
         elif verbose:
-            print(f"No compatible null model. Best KL-divergence: {kld} > kl_threshold: {kl_threshold}")
+            print(
+                f"No compatible null model. Best KL-divergence: {kld} > kl_threshold: {kl_threshold}"
+            )
 
     if sig_hash in pdf_cache and signature_cache:
         if verbose:
             print("Use cached anchor parameters")
-        f_alpha_pos, f_beta_pos, f_pos_ratio, f_alpha_neg, f_beta_neg, ks_pos, ks_neg = pdf_cache[sig_hash]["model"]
+        (
+            f_alpha_pos,
+            f_beta_pos,
+            f_pos_ratio,
+            f_alpha_neg,
+            f_beta_neg,
+            ks_pos,
+            ks_neg,
+        ) = pdf_cache[sig_hash]["model"]
     else:
-        f_alpha_pos, f_beta_pos, f_pos_ratio, f_alpha_neg, f_beta_neg, ks_pos, ks_neg = estimate_parameters(
-            abs_signature, library,
-            permutations=permutations, calibration_anchors=anchors,
-            processes=processes, symmetric=symmetric, plotting=plotting,
-            verbose=verbose, seed=seed, progress=progress,
-            max_size=max_size, ks_disable=ks_disable,
+        (
+            f_alpha_pos,
+            f_beta_pos,
+            f_pos_ratio,
+            f_alpha_neg,
+            f_beta_neg,
+            ks_pos,
+            ks_neg,
+        ) = estimate_parameters(
+            abs_signature,
+            library,
+            permutations=permutations,
+            calibration_anchors=anchors,
+            processes=processes,
+            symmetric=symmetric,
+            plotting=plotting,
+            verbose=verbose,
+            seed=seed,
+            progress=progress,
+            max_size=max_size,
+            ks_disable=ks_disable,
         )
         xv, pdf = create_pdf(signature["v"].to_numpy(), kl_bins)
         pdf_cache[sig_hash] = {
             "xvalues": xv,
             "pdf": pdf,
-            "model": (f_alpha_pos, f_beta_pos, f_pos_ratio, f_alpha_neg, f_beta_neg, ks_pos, ks_neg),
+            "model": (
+                f_alpha_pos,
+                f_beta_pos,
+                f_pos_ratio,
+                f_alpha_neg,
+                f_beta_neg,
+                ks_pos,
+                ks_neg,
+            ),
         }
 
     signature_genes = set(gene_names)
@@ -444,14 +568,16 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
     mp.dps = accuracy
     mp.prec = accuracy
 
-    for k in tqdm(library.keys(), desc="Enrichment ", disable=not verbose):
+    for k in library.keys():
         stripped_set = strip_gene_set(signature_genes, library[k])
         if not (min_size <= len(stripped_set) <= max_size):
             continue
 
         gsets.append(k)
         gsize = len(stripped_set)
-        es, legenes = _score_gene_set(abs_signature, signature_map, stripped_set, gene_names)
+        es, legenes = _score_gene_set(
+            abs_signature, signature_map, stripped_set, gene_names
+        )
 
         pos_alpha = f_alpha_pos(gsize)
         pos_beta = f_beta_pos(gsize)
@@ -464,7 +590,9 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
             if prob > 0.999999999 or prob < 0.00000000001:
                 mp.dps = deep_accuracy
                 mp.prec = deep_accuracy
-                prob = gammacdf(es, float(pos_alpha), float(pos_beta), dps=deep_accuracy)
+                prob = gammacdf(
+                    es, float(pos_alpha), float(pos_beta), dps=deep_accuracy
+                )
                 mp.dps = accuracy
                 mp.prec = accuracy
             prob_two_tailed = min(0.5, 1.0 - min(prob * pos_ratio + 1 - pos_ratio, 1.0))
@@ -475,10 +603,14 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
             if prob > 0.999999999 or prob < 0.00000000001:
                 mp.dps = deep_accuracy
                 mp.prec = deep_accuracy
-                prob = gammacdf(-es, float(neg_alpha), float(neg_beta), dps=deep_accuracy)
+                prob = gammacdf(
+                    -es, float(neg_alpha), float(neg_beta), dps=deep_accuracy
+                )
                 mp.dps = accuracy
                 mp.prec = accuracy
-            prob_two_tailed = min(0.5, 1.0 - min(prob - prob * pos_ratio + pos_ratio, 1.0))
+            prob_two_tailed = min(
+                0.5, 1.0 - min(prob - prob * pos_ratio + pos_ratio, 1.0)
+            )
             if prob_two_tailed == 0.5:
                 prob_two_tailed -= prob
             nes = invcdf(min(1.0, prob_two_tailed))
@@ -491,7 +623,7 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
         legeness.append(legenes)
 
     if not verbose:
-        np.seterr(divide='ignore')
+        np.seterr(divide="ignore")
 
     if len(pvals) > 1:
         fdr_values = multipletests(pvals, method="fdr_bh")[1].tolist()
@@ -500,21 +632,23 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
         fdr_values = pvals
         sidak_values = pvals
 
-    res = pl.DataFrame({
-        "Term": gsets,
-        "es": ess,
-        "nes": ness,
-        "pval": pvals,
-        "sidak": sidak_values,
-        "fdr": fdr_values,
-        "geneset_size": set_size,
-        "leading_edge": legeness,
-    })
+    res = pl.DataFrame(
+        {
+            "Term": gsets,
+            "es": ess,
+            "nes": ness,
+            "pval": pvals,
+            "sidak": sidak_values,
+            "fdr": fdr_values,
+            "geneset_size": set_size,
+            "leading_edge": legeness,
+        }
+    )
 
     if (ks_pos < 0.05 or ks_neg < 0.05) and verbose:
         print(
-            f'KS test failed. Gamma approximation deviates from permutation samples.\n'
-            f'KS p-value (pos): {ks_pos}\nKS p-value (neg): {ks_neg}'
+            f"KS test failed. Gamma approximation deviates from permutation samples.\n"
+            f"KS p-value (pos): {ks_pos}\nKS p-value (neg): {ks_neg}"
         )
 
     return res.sort(pl.col("pval").abs())
