@@ -2,7 +2,6 @@ import random
 import numpy as np
 import pandas as pd
 from statsmodels.nonparametric.smoothers_lowess import lowess
-from collections import Counter
 from scipy import interpolate
 
 from matplotlib import pyplot as plt
@@ -206,16 +205,64 @@ def loess_interpolation(x, y, frac=0.6, it=4):
     return interpolate.interp1d(x, yout, bounds_error=False, fill_value="extrapolate")
 
 
-def estimate_parameters(signature, abs_signature, signature_map, library, permutations: int = 2000, max_size=4000, symmetric: bool = False, calibration_anchors: int = 40, plotting: bool = False, processes=4, verbose=False, progress=False, seed: int = 0, ks_disable=False):
-    ll = [len(v) for v in library.values()]
-    cc = Counter(ll)
-    set_sizes = pd.DataFrame(list(cc.items()), columns=['set_size', 'count']).sort_values("set_size")
-    set_sizes["cumsum"] = np.cumsum(set_sizes.iloc[:, 1])
+def _score_gene_set(abs_signature, signature_map, gene_set, signature):
+    """O(K) enrichment score and leading edge for a single gene set.
 
-    anchor_set_sizes = [int(x) for x in np.linspace(1, np.max(ll), calibration_anchors)]
-    anchor_set_sizes.extend([1, 2, 3, 4, 5, 6, 7, 12, 16, 20, 30, 40, 50, 60, 70, 80, 100, np.max(ll) + 10, np.max(ll) + 30])
-    anchor_set_sizes = sorted(set(anchor_set_sizes))
-    anchor_set_sizes = [s for s in anchor_set_sizes if s < len(abs_signature)]
+    Replaces the enrichment_score() + get_leading_edge() pair in the main
+    scoring loop.  Uses the same sparse running-sum formula as
+    get_peak_size_adv(), avoiding O(N) cumsum and O(N) argmax.
+    """
+    hits_sorted = sorted(signature_map[x] for x in gene_set if x in signature_map)
+    K = len(hits_sorted)
+    if K == 0:
+        return 0.0, ""
+
+    N = len(abs_signature)
+    hs = np.array(hits_sorted, dtype=np.int64)
+    ah = abs_signature[hs]          # hit absolute values (float64 for accuracy)
+    ca = np.cumsum(ah)              # cumulative hit weight
+    total = ca[-1]
+    if total == 0.0:
+        return 0.0, ""
+
+    norm_hit = 1.0 / total
+    norm_no_hit = 1.0 / (N - K)
+    k_idx = np.arange(K, dtype=np.float64)
+
+    gap = hs.astype(np.float64) - k_idx      # miss positions before each hit
+    val_at_hit = ca * norm_hit - gap * norm_no_hit
+    val_before_hit = val_at_hit - ah * norm_hit
+
+    abs_at = np.abs(val_at_hit)
+    abs_bf = np.abs(val_before_hit)
+    iat = int(abs_at.argmax())
+    ibf = int(abs_bf.argmax())
+
+    if abs_at[iat] >= abs_bf[ibf]:
+        es = float(val_at_hit[iat])
+        peak_dense = int(hs[iat])
+    else:
+        es = float(val_before_hit[ibf])
+        peak_dense = max(0, int(hs[ibf]) - 1)
+
+    if es >= 0:
+        lgenes = [p for p in hits_sorted if p < peak_dense]
+    else:
+        lgenes = [p for p in hits_sorted if p >= peak_dense]
+
+    return es, ",".join(signature.index[lgenes])
+
+
+def estimate_parameters(signature, abs_signature, signature_map, library, permutations: int = 2000, max_size=4000, symmetric: bool = False, calibration_anchors: int = 40, plotting: bool = False, processes=4, verbose=False, progress=False, seed: int = 0, ks_disable=False):
+    max_ll = int(np.max([len(v) for v in library.values()]))
+
+    # Log-spaced anchors give dense coverage of small gene sets where the
+    # gamma parameters vary most, without the hardcoded extension list that
+    # inflated the total count well past calibration_anchors.
+    anchor_set_sizes = np.unique(
+        np.round(np.geomspace(1, max_ll, calibration_anchors)).astype(int)
+    ).tolist()
+    anchor_set_sizes = [s for s in anchor_set_sizes if 0 < s < len(abs_signature)]
 
     if processes == 1:
         process_generator = (
@@ -331,7 +378,9 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
 
     random.seed(seed)
     np.random.seed(seed)
-    sig_hash = hash(signature.to_string())
+    # tobytes() is O(N) C-level copy — ~100x faster than to_string() for large signatures.
+    sig_hash = hash(signature.iloc[:, 1].values.astype(np.float64).tobytes()
+                    + ",".join(map(str, signature.iloc[:, 0])).encode())
 
     if add_noise:
         signature.iloc[:, 1] += np.random.normal(signature.shape[0]) / (np.mean(np.abs(signature.iloc[:, 1])) * 100000)
@@ -389,8 +438,7 @@ def gsea(signature, library, permutations: int = 1000, anchors: int = 40, min_si
 
         gsets.append(k)
         gsize = len(stripped_set)
-        rs, es = enrichment_score(abs_signature, signature_map, stripped_set)
-        legenes = get_leading_edge(rs, signature, stripped_set, signature_map)
+        es, legenes = _score_gene_set(abs_signature, signature_map, stripped_set, signature)
 
         pos_alpha = f_alpha_pos(gsize)
         pos_beta = f_beta_pos(gsize)
