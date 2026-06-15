@@ -1,11 +1,12 @@
-import multiprocessing
 import random
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import polars as pl
 from matplotlib import pyplot as plt
 from mpmath import mp
 from scipy import interpolate
+from scipy.special import gammainc
 from scipy.stats import gamma, kstest
 from statsmodels.nonparametric.smoothers_lowess import lowess
 from statsmodels.stats.multitest import multipletests
@@ -17,7 +18,6 @@ from blitzgsea.signature_similarity import best_kl_fit, create_pdf
 mp.dps = 1000
 mp.prec = 1000
 pdf_cache: dict = {}
-
 
 def estimate_anchor_star(args: tuple) -> tuple[float, float, float, float, float, float, float]:
     return estimate_anchor(*args)
@@ -317,12 +317,12 @@ def estimate_parameters(
             for xx in anchor_set_sizes
         )
     else:
-        with multiprocessing.Pool(processes) as pool:
+        with ThreadPoolExecutor(max_workers=processes) as executor:
             args = [
                 (abs_signature, xx, permutations, symmetric, int(seed + xx), ks_disable)
                 for xx in anchor_set_sizes
             ]
-            results = list(pool.imap(estimate_anchor_star, args))
+            results = list(executor.map(estimate_anchor_star, args))
 
     alpha_pos, beta_pos, ks_pos_vals = [], [], []
     alpha_neg, beta_neg, ks_neg_vals = [], [], []
@@ -562,31 +562,50 @@ def gsea(
         }
 
     signature_genes = set(gene_names)
+
+    # First pass: collect valid sets so we can batch-evaluate the 5 LOESS
+    # interpolators once per unique size rather than once per gene set.
+    valid_gsets: list[tuple[str, list[str]]] = []
+    for k in library.keys():
+        stripped = strip_gene_set(signature_genes, library[k])
+        if min_size <= len(stripped) <= max_size:
+            valid_gsets.append((k, stripped))
+
+    if valid_gsets:
+        unique_sizes = np.array(
+            sorted({len(s) for _, s in valid_gsets}), dtype=float
+        )
+        _apos = f_alpha_pos(unique_sizes)
+        _bpos = f_beta_pos(unique_sizes)
+        _prat = np.clip(f_pos_ratio(unique_sizes), 0.0, 1.0)
+        _aneg = f_alpha_neg(unique_sizes)
+        _bneg = f_beta_neg(unique_sizes)
+        _size_idx: dict[int, int] = {int(s): i for i, s in enumerate(unique_sizes)}
+    else:
+        _size_idx = {}
+
     gsets, ess, pvals, ness, set_size, legeness = [], [], [], [], [], []
 
     # Set mpmath precision once for the scoring loop
     mp.dps = accuracy
     mp.prec = accuracy
 
-    for k in library.keys():
-        stripped_set = strip_gene_set(signature_genes, library[k])
-        if not (min_size <= len(stripped_set) <= max_size):
-            continue
-
+    for k, stripped_set in valid_gsets:
         gsets.append(k)
         gsize = len(stripped_set)
         es, legenes = _score_gene_set(
             abs_signature, signature_map, stripped_set, gene_names
         )
 
-        pos_alpha = f_alpha_pos(gsize)
-        pos_beta = f_beta_pos(gsize)
-        pos_ratio = max(0.0, min(1.0, float(f_pos_ratio(gsize))))
-        neg_alpha = f_alpha_neg(gsize)
-        neg_beta = f_beta_neg(gsize)
+        _i = _size_idx[gsize]
+        pos_alpha = float(_apos[_i])
+        pos_beta = float(_bpos[_i])
+        pos_ratio = float(_prat[_i])
+        neg_alpha = float(_aneg[_i])
+        neg_beta = float(_bneg[_i])
 
         if es > 0:
-            prob = gamma.cdf(es, float(pos_alpha), scale=float(pos_beta))
+            prob = float(gammainc(pos_alpha, es / pos_beta))
             if prob > 0.999999999 or prob < 0.00000000001:
                 mp.dps = deep_accuracy
                 mp.prec = deep_accuracy
@@ -599,7 +618,7 @@ def gsea(
             nes = invcdf(1.0 - min(1.0, prob_two_tailed))
             pval = 2 * prob_two_tailed
         else:
-            prob = gamma.cdf(-es, float(neg_alpha), scale=float(neg_beta))
+            prob = float(gammainc(neg_alpha, -es / neg_beta))
             if prob > 0.999999999 or prob < 0.00000000001:
                 mp.dps = deep_accuracy
                 mp.prec = deep_accuracy

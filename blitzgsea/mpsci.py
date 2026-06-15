@@ -3,6 +3,7 @@
 import math
 
 from mpmath import mp, exp, log
+from scipy.special import ndtri
 from scipy.stats import gamma, norm
 
 
@@ -56,7 +57,7 @@ def invcdf(p: float, mu: float = 0, sigma: float = 1) -> float:
     if math.isnan(p):
         p = 1
     p = min(max(p, 0), 1)
-    n = norm.isf(p)
+    n = ndtri(1.0 - p)
     if orig_p > 0.5:
         return -n
     return n
