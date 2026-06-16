@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blitzgsea"
-version = "1.3.53"
+version = "0.0.1"
 description = "Fast and accurate Gene Set Enrichment Analysis using gamma distribution approximation."
 readme = "README.md"
 license = { text = "Apache-2.0" }
-authors = [{ name = "Alexander Lachmann", email = "alexander.lachmann@mssm.edu" }]
+authors = [{ name = "James Hayhurst", email = "jhayhurst@ebi.ac.uk" }]
 requires-python = ">=3.14"
 dependencies = [
     "numpy",
