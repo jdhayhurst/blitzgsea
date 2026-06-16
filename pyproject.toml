@@ -35,3 +35,9 @@ blitzgsea = ["data/config.json", "data/KEGG_2021_Human"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.0",
+    "pytest-cov>=7.1.0",
+]

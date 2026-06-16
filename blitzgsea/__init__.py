@@ -208,14 +208,24 @@ def get_peak_size_adv(
         val_at_hit = ca * nh - gap * norm_no_hit  # running sum after k-th hit
         val_before_hit = val_at_hit - ah * nh  # running sum just before k-th hit
 
-        # Peak ES = candidate with largest absolute running sum across 2K points
+        # Peak ES = candidate with largest absolute running sum across 2K points.
+        # Ties broken by dense position: val_before_hit[k] is at hs[k]-1,
+        # val_at_hit[k] is at hs[k], so before-hit has a smaller index and
+        # wins in a tie (matching np.argmax first-occurrence semantics).
         abs_at = np.abs(val_at_hit)
         abs_bf = np.abs(val_before_hit)
         r = np.arange(batch)
         iat = abs_at.argmax(axis=1)
         ibf = abs_bf.argmax(axis=1)
+        abs_at_val = abs_at[r, iat]
+        abs_bf_val = abs_bf[r, ibf]
+        pos_at = hs[r, iat].astype(np.int32)
+        pos_bf = np.maximum(0, hs[r, ibf].astype(np.int32) - 1)
+        at_wins = (abs_at_val > abs_bf_val) | (
+            (abs_at_val == abs_bf_val) & (pos_at <= pos_bf)
+        )
         es_batch = np.where(
-            abs_at[r, iat] >= abs_bf[r, ibf],
+            at_wins,
             val_at_hit[r, iat],
             val_before_hit[r, ibf],
         )
@@ -274,12 +284,17 @@ def _score_gene_set(
     iat = int(abs_at.argmax())
     ibf = int(abs_bf.argmax())
 
-    if abs_at[iat] >= abs_bf[ibf]:
+    # Tie-break by dense position: val_before_hit[k] is at position hs[k]-1,
+    # val_at_hit[k] is at hs[k], so before-hit always comes first within the
+    # same k.  np.argmax returns the *first* maximum, so we replicate that.
+    pos_at = int(hs[iat])
+    pos_bf = max(0, int(hs[ibf]) - 1)
+    if abs_at[iat] > abs_bf[ibf] or (abs_at[iat] == abs_bf[ibf] and pos_at <= pos_bf):
         es = float(val_at_hit[iat])
-        peak_dense = int(hs[iat])
+        peak_dense = pos_at
     else:
         es = float(val_before_hit[ibf])
-        peak_dense = max(0, int(hs[ibf]) - 1)
+        peak_dense = pos_bf
 
     if es >= 0:
         lgenes = [p for p in hits_sorted if p < peak_dense]
@@ -496,7 +511,6 @@ def gsea(
         )
         signature = signature.with_columns((pl.col("v") + noise).alias("v"))
 
-    # Sort descending, deduplicate on gene ID keeping first (highest-ranked).
     signature = signature.sort("v", descending=True).unique(
         subset=["i"], keep="first", maintain_order=True
     )
