@@ -511,7 +511,7 @@ def gsea(
         )
         signature = signature.with_columns((pl.col("v") + noise).alias("v"))
 
-    signature = signature.sort("v", descending=True).unique(
+    signature = signature.sort("v", descending=True, maintain_order=True).unique(
         subset=["i"], keep="first", maintain_order=True
     )
     library = {key: set(value) for key, value in library.items()}
