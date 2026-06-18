@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blitzgsea"
-version = "0.0.1"
+version = "0.0.2"
 description = "Fast and accurate Gene Set Enrichment Analysis using gamma distribution approximation."
 readme = "README.md"
 license = { text = "Apache-2.0" }
