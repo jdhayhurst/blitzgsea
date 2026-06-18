@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import polars as pl
 from matplotlib import pyplot as plt
+from matplotlib.pylab import ma
 from mpmath import mp
 from scipy import interpolate
 from scipy.special import gammainc
@@ -312,7 +313,7 @@ def estimate_parameters(
     symmetric: bool = False,
     calibration_anchors: int = 40,
     plotting: bool = False,
-    processes: int = 4,
+    max_workers: int | None = None,
     verbose: bool = False,
     progress: bool = False,
     seed: int = 0,
@@ -336,20 +337,12 @@ def estimate_parameters(
     ).tolist()
     anchor_set_sizes = [s for s in anchor_set_sizes if 0 < s < len(abs_signature)]
 
-    if processes == 1:
-        results = list(
-            estimate_anchor(
-                abs_signature, xx, permutations, symmetric, int(seed + xx), ks_disable
-            )
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        args = [
+            (abs_signature, xx, permutations, symmetric, int(seed + xx), ks_disable)
             for xx in anchor_set_sizes
-        )
-    else:
-        with ThreadPoolExecutor(max_workers=processes) as executor:
-            args = [
-                (abs_signature, xx, permutations, symmetric, int(seed + xx), ks_disable)
-                for xx in anchor_set_sizes
-            ]
-            results = list(executor.map(estimate_anchor_star, args))
+        ]
+        results = list(executor.map(estimate_anchor_star, args))
 
     alpha_pos, beta_pos, ks_pos_vals = [], [], []
     alpha_neg, beta_neg, ks_neg_vals = [], [], []
@@ -430,7 +423,7 @@ def gsea(
     anchors: int = 40,
     min_size: int = 5,
     max_size: int = 4000,
-    processes: int = 4,
+    max_workers: int | None = None,
     plotting: bool = False,
     verbose: bool = False,
     progress: bool = False,
@@ -461,8 +454,8 @@ def gsea(
         Number of anchor set sizes for calibration. Default 40.
     min_size, max_size : int
         Gene set size filter. Defaults 5, 4000.
-    processes : int
-        Parallel calibration workers. Default 4.
+    max_workers : int | None
+        Max workers for thread pool. Default None.
     symmetric : bool
         Use a single gamma for both ES tails. Default False.
     signature_cache : bool
@@ -565,7 +558,7 @@ def gsea(
             library,
             permutations=permutations,
             calibration_anchors=anchors,
-            processes=processes,
+            max_workers=max_workers,
             symmetric=symmetric,
             plotting=plotting,
             verbose=verbose,
