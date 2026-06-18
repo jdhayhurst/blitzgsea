@@ -15,12 +15,10 @@ import blitzgsea
 # Fast parameters used across all integration tests
 _GSEA_KWARGS = dict(
     seed=42,
-    processes=1,
+    max_workers=1,
     permutations=200,
     anchors=5,
     min_size=5,
-    verbose=False,
-    progress=False,
 )
 
 EXPECTED_COLUMNS = {"Term", "es", "nes", "pval", "sidak", "fdr", "geneset_size", "leading_edge"}

@@ -1,10 +1,10 @@
 import random
 from concurrent.futures import ThreadPoolExecutor
+from typing import NamedTuple
 
 import numpy as np
 import polars as pl
 from matplotlib import pyplot as plt
-from matplotlib.pylab import ma
 from mpmath import mp
 from scipy import interpolate
 from scipy.special import gammainc
@@ -34,7 +34,7 @@ def estimate_anchor(
     seed: int,
     ks_disable: bool,
 ) -> tuple[float, float, float, float, float, float, float]:
-    es = np.array(get_peak_size_adv(abs_signature, set_size, permutations, int(seed)))
+    es = get_peak_size_adv(abs_signature, set_size, permutations, seed)
 
     pos = es[es > 0]
     neg = es[es < 0]
@@ -43,7 +43,7 @@ def estimate_anchor(
         symmetric = True
 
     if symmetric:
-        aes = np.abs(es)[es != 0]
+        aes = np.abs(es[es != 0])
         fit_alpha, fit_loc, fit_beta = gamma.fit(aes, floc=0)
 
         if ks_disable:
@@ -66,11 +66,9 @@ def estimate_anchor(
         alpha_pos = fit_alpha
         beta_pos = fit_beta
 
-        fit_alpha, fit_loc, fit_beta = gamma.fit(-np.array(neg), floc=0)
+        fit_alpha, fit_loc, fit_beta = gamma.fit(-neg, floc=0)
         if not ks_disable:
-            ks_neg = kstest(
-                -np.array(neg), "gamma", args=(fit_alpha, fit_loc, fit_beta)
-            )[1]
+            ks_neg = kstest(-neg, "gamma", args=(fit_alpha, fit_loc, fit_beta))[1]
         alpha_neg = fit_alpha
         beta_neg = fit_beta
 
@@ -150,15 +148,21 @@ def get_peak_size_adv(
     number_hits: int,
     permutations: int,
     seed: int,
-) -> list[float]:
+) -> np.ndarray:
     """
     Generate null-distribution ES values via O(K) sparse sampling.
 
-    Uses exponential-spacing order statistics to place K hits in O(K) per
-    permutation instead of O(N), giving a ~300x speedup for typical N >> K.
-    Hit positions are sorted by construction, so the running sum can be
-    evaluated analytically at only 2K candidate extrema rather than by a
-    dense cumsum over N elements.
+    For K < 200 (K/N < ~1.6%): uses exponential-spacing order statistics —
+    O(K) per permutation, collision-free at small K/N ratios.
+
+    For K >= 200: uses rng.choice(replace=False, shuffle=False) which returns
+    K distinct sorted integers in O(K) time with no collision risk.  The exp-
+    spacing method degrades silently above K/N ≈ 1-2% (birthday-problem
+    collisions produce duplicate hit positions); rng.choice avoids this.
+
+    Either way, hit positions are sorted by construction so the running sum is
+    evaluated analytically at only 2K candidate extrema rather than with a
+    dense O(N) cumsum.
     """
     rng = np.random.default_rng(seed)
     N = len(abs_signature)
@@ -166,10 +170,17 @@ def get_peak_size_adv(
     number_miss = N - K
     norm_no_hit = np.float32(1.0 / number_miss)
     abs_sig_f32 = abs_signature.astype(np.float32)
-    k_idx = np.arange(K, dtype=np.float32)  # 0..K-1 for gap computation
+    k_idx = np.arange(K, dtype=np.float32)
 
     # ~6 float32 arrays of size (batch, K) → 24 bytes per element
     batch_size = max(1, min(permutations, int(50_000_000 // (K * 24))))
+
+    # Collision fix-up converges only when expected collisions per row are low.
+    # Expected collisions = K*(K-1)/(2N); when K²/N > 10 (i.e. more than ~5
+    # expected collisions per row), P(no collision) < e^{-5} ≈ 0.7%, so each
+    # retry fixes < 1% of rows — pure wasted work.  Below the threshold retries
+    # meaningfully reduce the fraction of rows with duplicate hit positions.
+    max_retries = 8 if K * K < 10 * N else 0
 
     es_chunks: list = []
     remaining = permutations
@@ -178,41 +189,45 @@ def get_peak_size_adv(
         batch = min(batch_size, remaining)
         remaining -= batch
 
-        # O(K) sorted without-replacement sampling via exponential spacings.
-        # K+1 i.i.d. Exp(1) values; their normalised prefix cumsums are the
-        # order statistics of K Uniform[0,1] draws (Devroye 1986).
-        exp = rng.exponential(1.0, size=(batch, K + 1)).astype(np.float32)
+        # Exponential-spacing order statistics (Devroye 1986): K+1 i.i.d.
+        # Exp(1) values; their normalised prefix cumsums are the order statistics
+        # of K Uniform[0,1] draws, giving a sorted hit-position array in O(K).
+        # standard_exponential(dtype=float32) generates float32 directly,
+        # avoiding a float64 allocation + conversion.
+        exp = rng.standard_exponential(
+            size=(batch, K + 1), dtype=np.float32, method="zig"
+        )
         cumexp = np.cumsum(exp, axis=1)
         U = cumexp[:, :K] / cumexp[:, -1:]
-        hs = np.clip(np.floor(U * N).astype(np.int32), 0, N - 1)  # (batch, K)
+        hs = np.clip(np.floor(U * N).astype(np.int32), 0, N - 1)
 
-        # Resample any rows with collisions (~6% at typical K).
-        for _ in range(8):
+        # Resample rows with adjacent-duplicate positions (birthday-problem
+        # collision rate ≈ K/N per pair).  Skipped when K/N ≥ 2.5% because
+        # retries provably don't converge there — see max_retries above.
+        for _ in range(max_retries):
             bad = (np.diff(hs, axis=1) == 0).any(axis=1)
             if not bad.any():
                 break
             nb = int(bad.sum())
-            e2 = rng.exponential(1.0, size=(nb, K + 1)).astype(np.float32)
+            e2 = rng.standard_exponential(
+                size=(nb, K + 1), dtype=np.float32, method="zig"
+            )
             c2 = np.cumsum(e2, axis=1)
             hs[bad] = np.clip(
                 np.floor((c2[:, :K] / c2[:, -1:]) * N).astype(np.int32), 0, N - 1
             )
 
-        # O(K) sparse ES formula.
-        # hs is sorted ascending; ah[b,k] = abs_signature[hs[b,k]].
-        ah = abs_sig_f32[hs]  # (batch, K) — hit absolute values
-        ca = np.cumsum(ah, axis=1)  # (batch, K) — cumulative hit weight up to k-th hit
-        nh = np.float32(1.0) / ca[:, -1:]  # (batch, 1) — 1 / total hit weight
+        # O(K) sparse ES formula: evaluate the running sum only at the 2K
+        # positions adjacent to each hit (before and after), then take the peak.
+        ah = abs_sig_f32[hs]  # (batch, K) hit absolute values
+        ca = np.cumsum(ah, axis=1)  # cumulative hit weight up to k-th hit
+        nh = np.float32(1.0) / ca[:, -1:]  # 1 / total hit weight
 
-        # gap[b,k] = number of miss positions before the k-th hit = hs[b,k] - k
-        gap = hs.astype(np.float32) - k_idx  # (batch, K)
-        val_at_hit = ca * nh - gap * norm_no_hit  # running sum after k-th hit
-        val_before_hit = val_at_hit - ah * nh  # running sum just before k-th hit
+        # gap[b,k] = number of miss positions strictly before the k-th hit
+        gap = hs.astype(np.float32) - k_idx
+        val_at_hit = ca * nh - gap * norm_no_hit
+        val_before_hit = val_at_hit - ah * nh
 
-        # Peak ES = candidate with largest absolute running sum across 2K points.
-        # Ties broken by dense position: val_before_hit[k] is at hs[k]-1,
-        # val_at_hit[k] is at hs[k], so before-hit has a smaller index and
-        # wins in a tie (matching np.argmax first-occurrence semantics).
         abs_at = np.abs(val_at_hit)
         abs_bf = np.abs(val_before_hit)
         r = np.arange(batch)
@@ -234,7 +249,7 @@ def get_peak_size_adv(
         valid = ~np.isnan(es_batch)
         es_chunks.append(es_batch[valid])
 
-    return np.concatenate(es_chunks).tolist()
+    return np.concatenate(es_chunks)
 
 
 def loess_interpolation(
@@ -249,25 +264,21 @@ def loess_interpolation(
 
 def _score_gene_set(
     abs_signature: np.ndarray,
-    signature_map: dict[str, int],
-    gene_set: list[str] | set[str],
+    hs: np.ndarray,
     gene_names: list[str],
 ) -> tuple[float, str]:
     """O(K) enrichment score and leading edge for a single gene set.
 
-    Replaces the enrichment_score() + get_leading_edge() pair in the main
-    scoring loop.  Uses the same sparse running-sum formula as
-    get_peak_size_adv(), avoiding O(N) cumsum and O(N) argmax.
+    `hs` must be a sorted int32/int64 array of hit indices into abs_signature,
+    pre-computed in the gsea() loop (avoids repeated dict lookups per gene set).
     """
-    hits_sorted = sorted(signature_map[x] for x in gene_set if x in signature_map)
-    K = len(hits_sorted)
+    K = len(hs)
     if K == 0:
         return 0.0, ""
 
     N = len(abs_signature)
-    hs = np.array(hits_sorted, dtype=np.int64)
-    ah = abs_signature[hs]  # hit absolute values (float64 for accuracy)
-    ca = np.cumsum(ah)  # cumulative hit weight
+    ah = abs_signature[hs]
+    ca = np.cumsum(ah)
     total = ca[-1]
     if total == 0.0:
         return 0.0, ""
@@ -276,7 +287,7 @@ def _score_gene_set(
     norm_no_hit = 1.0 / (N - K)
     k_idx = np.arange(K, dtype=np.float64)
 
-    gap = hs.astype(np.float64) - k_idx  # miss positions before each hit
+    gap = hs.astype(np.float64) - k_idx
     val_at_hit = ca * norm_hit - gap * norm_no_hit
     val_before_hit = val_at_hit - ah * norm_hit
 
@@ -285,9 +296,6 @@ def _score_gene_set(
     iat = int(abs_at.argmax())
     ibf = int(abs_bf.argmax())
 
-    # Tie-break by dense position: val_before_hit[k] is at position hs[k]-1,
-    # val_at_hit[k] is at hs[k], so before-hit always comes first within the
-    # same k.  np.argmax returns the *first* maximum, so we replicate that.
     pos_at = int(hs[iat])
     pos_bf = max(0, int(hs[ibf]) - 1)
     if abs_at[iat] > abs_bf[ibf] or (abs_at[iat] == abs_bf[ibf] and pos_at <= pos_bf):
@@ -298,44 +306,69 @@ def _score_gene_set(
         peak_dense = pos_bf
 
     if es >= 0:
-        lgenes = [p for p in hits_sorted if p < peak_dense]
+        lgenes = hs[hs < peak_dense].tolist()
     else:
-        lgenes = [p for p in hits_sorted if p >= peak_dense]
+        lgenes = hs[hs >= peak_dense].tolist()
 
     return es, ",".join(gene_names[p] for p in lgenes)
+
+
+def compute_anchor_sizes(
+    library: dict[str, set[str]],
+    abs_signature: np.ndarray,
+    calibration_anchors: int,
+) -> np.ndarray:
+    max_ll = max(len(v) for v in library.values())
+    # Log-spaced anchors give dense coverage of small gene sets where the
+    # gamma parameters vary most, without the hardcoded extension list that
+    # inflated the total count well past calibration_anchors.
+    sizes = np.unique(
+        np.round(np.geomspace(1, max_ll, calibration_anchors)).astype(int)
+    )
+    return sizes[(sizes > 0) & (sizes < len(abs_signature))]
+
+
+def plot(anchor_set_sizes, result: CalibrationResult) -> None:
+    xx = np.linspace(min(anchor_set_sizes), max(anchor_set_sizes), 1000)
+    for fig_idx, (label, ydata, ysmooth) in enumerate(
+        [
+            ("alpha pos", result.alpha_pos, result.alpha_pos(xx)),
+            ("alpha neg", result.alpha_neg, result.alpha_neg(xx)),
+            ("beta pos", result.beta_pos, result.beta_pos(xx)),
+            ("beta neg", result.beta_neg, result.beta_neg(xx)),
+            ("pos ratio", result.pos_ratio, result.pos_ratio(xx)),
+        ],
+        1,
+    ):
+        plt.figure(fig_idx)
+        plt.plot(xx, ysmooth, "--", lw=3)
+        plt.plot(anchor_set_sizes, ydata, "o")
+        plt.title(label)
+
+
+class CalibrationResult(NamedTuple):
+    alpha_pos: interpolate.interp1d
+    beta_pos: interpolate.interp1d
+    pos_ratio: interpolate.interp1d
+    alpha_neg: interpolate.interp1d
+    beta_neg: interpolate.interp1d
+    ks_pos: float
+    ks_neg: float
 
 
 def estimate_parameters(
     abs_signature: np.ndarray,
     library: dict[str, set[str]],
     permutations: int = 2000,
-    max_size: int = 4000,
     symmetric: bool = False,
     calibration_anchors: int = 40,
     plotting: bool = False,
     max_workers: int | None = None,
     verbose: bool = False,
-    progress: bool = False,
     seed: int = 0,
     ks_disable: bool = False,
-) -> tuple[
-    interpolate.interp1d,
-    interpolate.interp1d,
-    interpolate.interp1d,
-    interpolate.interp1d,
-    interpolate.interp1d,
-    float,
-    float,
-]:
-    max_ll = int(np.max([len(v) for v in library.values()]))
-
-    # Log-spaced anchors give dense coverage of small gene sets where the
-    # gamma parameters vary most, without the hardcoded extension list that
-    # inflated the total count well past calibration_anchors.
-    anchor_set_sizes = np.unique(
-        np.round(np.geomspace(1, max_ll, calibration_anchors)).astype(int)
-    ).tolist()
-    anchor_set_sizes = [s for s in anchor_set_sizes if 0 < s < len(abs_signature)]
+) -> CalibrationResult:
+    anchor_set_sizes = compute_anchor_sizes(library, abs_signature, calibration_anchors)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         args = [
@@ -344,33 +377,20 @@ def estimate_parameters(
         ]
         results = list(executor.map(estimate_anchor_star, args))
 
-    alpha_pos, beta_pos, ks_pos_vals = [], [], []
-    alpha_neg, beta_neg, ks_neg_vals = [], [], []
-    pos_ratio = []
-
-    for (
-        f_alpha_pos,
-        f_beta_pos,
-        f_ks_pos,
-        f_alpha_neg,
-        f_beta_neg,
-        f_ks_neg,
-        f_pos_ratio,
-    ) in results:
-        alpha_pos.append(f_alpha_pos)
-        beta_pos.append(f_beta_pos)
-        ks_pos_vals.append(f_ks_pos)
-        alpha_neg.append(f_alpha_neg)
-        beta_neg.append(f_beta_neg)
-        ks_neg_vals.append(f_ks_neg)
-        pos_ratio.append(f_pos_ratio)
+    (
+        alpha_pos,
+        beta_pos,
+        ks_pos_vals,
+        alpha_neg,
+        beta_neg,
+        ks_neg_vals,
+        pos_ratio,
+    ) = zip(*results)
 
     if np.max(pos_ratio) > 1.5 and verbose:
         print(
             "Significant unbalance between positive and negative enrichment scores detected."
         )
-
-    anchor_set_sizes = np.array(anchor_set_sizes, dtype=float)
 
     f_alpha_pos = loess_interpolation(anchor_set_sizes, alpha_pos)
     f_beta_pos = loess_interpolation(anchor_set_sizes, beta_pos, frac=0.15)
@@ -381,32 +401,22 @@ def estimate_parameters(
     pos_ratio = np.array(pos_ratio) - np.abs(0.0001 * np.random.randn(len(pos_ratio)))
     f_pos_ratio = loess_interpolation(anchor_set_sizes, pos_ratio, frac=0.5)
 
-    if plotting:
-        xx = np.linspace(min(anchor_set_sizes), max(anchor_set_sizes), 1000)
-        for fig_idx, (label, ydata, ysmooth) in enumerate(
-            [
-                ("alpha pos", alpha_pos, f_alpha_pos(xx)),
-                ("alpha neg", alpha_neg, f_alpha_neg(xx)),
-                ("beta pos", beta_pos, f_beta_pos(xx)),
-                ("beta neg", beta_neg, f_beta_neg(xx)),
-                ("pos ratio", pos_ratio, f_pos_ratio(xx)),
-            ],
-            1,
-        ):
-            plt.figure(fig_idx)
-            plt.plot(xx, ysmooth, "--", lw=3)
-            plt.plot(anchor_set_sizes, ydata, "o")
-            plt.title(label)
-
-    return (
-        f_alpha_pos,
-        f_beta_pos,
-        f_pos_ratio,
-        f_alpha_neg,
-        f_beta_neg,
-        np.mean(ks_pos_vals),
-        np.mean(ks_neg_vals),
+    calibration_result = CalibrationResult(
+        alpha_pos=f_alpha_pos,
+        beta_pos=f_beta_pos,
+        pos_ratio=f_pos_ratio,
+        alpha_neg=f_alpha_neg,
+        beta_neg=f_beta_neg,
+        ks_pos=float(np.mean(ks_pos_vals)),
+        ks_neg=float(np.mean(ks_neg_vals)),
     )
+    if plotting:
+        plot(
+            anchor_set_sizes,
+            calibration_result,
+        )
+
+    return calibration_result
 
 
 def clean_library(
@@ -418,7 +428,7 @@ def clean_library(
 
 def gsea(
     signature: pl.DataFrame,
-    library: dict[str, list[str]],
+    library: dict[str, list[str] | set[str]],
     permutations: int = 1000,
     anchors: int = 40,
     min_size: int = 5,
@@ -426,7 +436,6 @@ def gsea(
     max_workers: int | None = None,
     plotting: bool = False,
     verbose: bool = False,
-    progress: bool = False,
     symmetric: bool = False,
     signature_cache: bool = True,
     kl_threshold: float = 0.3,
@@ -563,11 +572,12 @@ def gsea(
             plotting=plotting,
             verbose=verbose,
             seed=seed,
-            progress=progress,
-            max_size=max_size,
             ks_disable=ks_disable,
         )
-        xv, pdf = create_pdf(signature["v"].to_numpy(), kl_bins)
+        if shared_null:
+            xv, pdf = create_pdf(signature["v"].to_numpy(), kl_bins)
+        else:
+            xv, pdf = None, None
         pdf_cache[sig_hash] = {
             "xvalues": xv,
             "pdf": pdf,
@@ -582,15 +592,14 @@ def gsea(
             ),
         }
 
-    signature_genes = set(gene_names)
-
-    # First pass: collect valid sets so we can batch-evaluate the 5 LOESS
-    # interpolators once per unique size rather than once per gene set.
-    valid_gsets: list[tuple[str, list[str]]] = []
-    for k in library.keys():
-        stripped = strip_gene_set(signature_genes, library[k])
-        if min_size <= len(stripped) <= max_size:
-            valid_gsets.append((k, stripped))
+    # Build valid_gsets: pre-compute sorted hit-index arrays so the scoring
+    # loop uses only numpy ops (no per-gene-set dict lookups).
+    valid_gsets: list[tuple[str, np.ndarray]] = []
+    for k, gene_set in library.items():
+        idxs = sorted(signature_map[x] for x in gene_set if x in signature_map)
+        n = len(idxs)
+        if min_size <= n <= max_size:
+            valid_gsets.append((k, np.array(idxs, dtype=np.int64)))
 
     if valid_gsets:
         unique_sizes = np.array(sorted({len(s) for _, s in valid_gsets}), dtype=float)
@@ -609,12 +618,10 @@ def gsea(
     mp.dps = accuracy
     mp.prec = accuracy
 
-    for k, stripped_set in valid_gsets:
+    for k, hs in valid_gsets:
         gsets.append(k)
-        gsize = len(stripped_set)
-        es, legenes = _score_gene_set(
-            abs_signature, signature_map, stripped_set, gene_names
-        )
+        gsize = len(hs)
+        es, legenes = _score_gene_set(abs_signature, hs, gene_names)
 
         _i = _size_idx[gsize]
         pos_alpha = float(_apos[_i])

@@ -26,6 +26,11 @@ from blitzgsea import (
 )
 
 
+def _make_hs(sig_map: dict, gene_set: list) -> np.ndarray:
+    """Convert a gene-name list to a sorted int64 index array for _score_gene_set."""
+    return np.array(sorted(sig_map[x] for x in gene_set if x in sig_map), dtype=np.int64)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -85,7 +90,7 @@ class TestScoreGeneSetTransparency:
     @pytest.mark.parametrize("name,gene_set", GENE_SETS)
     def test_es_identical(self, name, gene_set, medium_abs_sig, medium_sig_map, medium_gene_names):
         _, es_dense = enrichment_score(medium_abs_sig, medium_sig_map, gene_set)
-        es_sparse, _ = _score_gene_set(medium_abs_sig, medium_sig_map, gene_set, medium_gene_names)
+        es_sparse, _ = _score_gene_set(medium_abs_sig, _make_hs(medium_sig_map, gene_set), medium_gene_names)
         assert es_sparse == pytest.approx(es_dense, rel=1e-6), (
             f"{name}: sparse ES {es_sparse} != dense ES {es_dense}"
         )
@@ -93,24 +98,24 @@ class TestScoreGeneSetTransparency:
     @pytest.mark.parametrize("name,gene_set", GENE_SETS)
     def test_es_sign_identical(self, name, gene_set, medium_abs_sig, medium_sig_map, medium_gene_names):
         _, es_dense = enrichment_score(medium_abs_sig, medium_sig_map, gene_set)
-        es_sparse, _ = _score_gene_set(medium_abs_sig, medium_sig_map, gene_set, medium_gene_names)
+        es_sparse, _ = _score_gene_set(medium_abs_sig, _make_hs(medium_sig_map, gene_set), medium_gene_names)
         if es_dense != 0.0:
             assert np.sign(es_sparse) == np.sign(es_dense)
 
     def test_leading_edge_genes_are_subset_of_hits(self, medium_abs_sig, medium_sig_map, medium_gene_names):
         gene_set = [f"GENE_{i}" for i in range(20)]
-        es, leading_edge = _score_gene_set(medium_abs_sig, medium_sig_map, gene_set, medium_gene_names)
+        es, leading_edge = _score_gene_set(medium_abs_sig, _make_hs(medium_sig_map, gene_set), medium_gene_names)
         if leading_edge:
             le_genes = set(leading_edge.split(","))
             assert le_genes.issubset(set(gene_set))
 
     def test_empty_gene_set_returns_zero(self, medium_abs_sig, medium_sig_map, medium_gene_names):
-        es, le = _score_gene_set(medium_abs_sig, medium_sig_map, [], medium_gene_names)
+        es, le = _score_gene_set(medium_abs_sig, _make_hs(medium_sig_map, []), medium_gene_names)
         assert es == 0.0
         assert le == ""
 
     def test_no_overlap_returns_zero(self, medium_abs_sig, medium_sig_map, medium_gene_names):
-        es, le = _score_gene_set(medium_abs_sig, medium_sig_map, ["NOTHERE"], medium_gene_names)
+        es, le = _score_gene_set(medium_abs_sig, _make_hs(medium_sig_map, ["NOTHERE"]), medium_gene_names)
         assert es == 0.0
 
     def test_leading_edge_zero_abs_sig_tie(self):
@@ -123,7 +128,7 @@ class TestScoreGeneSetTransparency:
 
         rs, es_dense = enrichment_score(abs_sig, sig_map, gene_set)
         le_dense = get_leading_edge(rs, gene_names, gene_set, sig_map)
-        es_sparse, le_sparse = _score_gene_set(abs_sig, sig_map, gene_set, gene_names)
+        es_sparse, le_sparse = _score_gene_set(abs_sig, _make_hs(sig_map, gene_set), gene_names)
 
         assert es_sparse == pytest.approx(es_dense, rel=1e-6), (
             f"zero-abs-sig tie: sparse ES {es_sparse} != dense ES {es_dense}"
@@ -151,7 +156,7 @@ class TestScoreGeneSetTransparency:
 
             rs, _ = enrichment_score(abs_sig, sig_map, gene_set)
             le_dense = get_leading_edge(rs, gene_names, gene_set, sig_map)
-            _, le_sparse = _score_gene_set(abs_sig, sig_map, gene_set, gene_names)
+            _, le_sparse = _score_gene_set(abs_sig, _make_hs(sig_map, gene_set), gene_names)
 
             dense_set = set(le_dense.split(",")) if le_dense else set()
             sparse_set = set(le_sparse.split(",")) if le_sparse else set()
@@ -250,7 +255,7 @@ class TestThreadPoolTransparency:
             library,
             permutations=200,
             seed=seed,
-            processes=processes,
+            max_workers=processes,
             anchors=10,
             ks_disable=True,
         )

@@ -196,6 +196,59 @@ class TestGetLeadingEdge:
 
 
 # ---------------------------------------------------------------------------
+# compute_anchor_sizes
+# ---------------------------------------------------------------------------
+
+class TestComputeAnchorSizes:
+    def _lib(self, sizes):
+        return {f"set_{i}": set(range(s)) for i, s in enumerate(sizes)}
+
+    def test_returns_ndarray_of_ints(self):
+        lib = self._lib([10, 20, 50])
+        sig = np.ones(100)
+        result = blitzgsea.compute_anchor_sizes(lib, sig, 10)
+        assert isinstance(result, np.ndarray)
+        assert np.issubdtype(result.dtype, np.integer)
+
+    def test_all_sizes_within_signature_bounds(self):
+        sig = np.ones(100)
+        lib = self._lib([10, 50, 80])
+        result = blitzgsea.compute_anchor_sizes(lib, sig, 20)
+        assert all(0 < s < len(sig) for s in result)
+
+    def test_sizes_are_sorted_and_unique(self):
+        sig = np.ones(500)
+        lib = self._lib([100, 200, 300])
+        result = blitzgsea.compute_anchor_sizes(lib, sig, 40)
+        assert np.array_equal(result, np.unique(result))
+
+    def test_respects_calibration_anchors_upper_bound(self):
+        sig = np.ones(500)
+        lib = self._lib([200])
+        result = blitzgsea.compute_anchor_sizes(lib, sig, 10)
+        assert len(result) <= 10
+
+    def test_max_anchor_does_not_exceed_max_gene_set_size(self):
+        sig = np.ones(500)
+        lib = self._lib([100])
+        result = blitzgsea.compute_anchor_sizes(lib, sig, 40)
+        assert max(result) <= 100
+
+    def test_excludes_sizes_at_or_beyond_signature_length(self):
+        sig = np.ones(50)
+        lib = self._lib([200])  # max_ll > len(sig)
+        result = blitzgsea.compute_anchor_sizes(lib, sig, 40)
+        assert all(s < 50 for s in result)
+
+    def test_log_spacing_covers_small_sizes(self):
+        sig = np.ones(10000)
+        lib = self._lib([5000])
+        result = blitzgsea.compute_anchor_sizes(lib, sig, 40)
+        # geomspace from 1 → large: small sizes (< 10) should be present
+        assert any(s < 10 for s in result)
+
+
+# ---------------------------------------------------------------------------
 # loess_interpolation
 # ---------------------------------------------------------------------------
 

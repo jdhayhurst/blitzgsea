@@ -1,8 +1,9 @@
 import numpy as np
 import polars as pl
 from matplotlib import pyplot as plt
-from matplotlib.patches import Rectangle
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
+
 import blitzgsea as blitz
 
 
@@ -10,7 +11,9 @@ def _prepare_signature(signature: pl.DataFrame, center: bool) -> pl.DataFrame:
     """Sort, dedup, optionally center; return polars DataFrame with cols i, v."""
     cols = signature.columns
     sig = signature.rename({cols[0]: "i", cols[1]: "v"})
-    sig = sig.sort("v", descending=True).unique(subset=["i"], keep="first", maintain_order=True)
+    sig = sig.sort("v", descending=True).unique(
+        subset=["i"], keep="first", maintain_order=True
+    )
     if center:
         sig = sig.with_columns((pl.col("v") - pl.col("v").mean()).alias("v"))
     return sig
@@ -66,8 +69,13 @@ def running_sum(
     plt.xlim([0, len(running_sum_list)])
 
     nn = int(np.abs(running_sum_arr).argmax())
-    ax1.vlines(x=nn, ymin=np.min(running_sum_list), ymax=np.max(running_sum_list),
-               linestyle=":", color="red")
+    ax1.vlines(
+        x=nn,
+        ymin=np.min(running_sum_list),
+        ymax=np.max(running_sum_list),
+        linestyle=":",
+        color="red",
+    )
 
     fs_label = 25 if compact else 20
     va = "bottom" if es > 0 else "top"
@@ -76,9 +84,16 @@ def running_sum(
         label = f"NES={nes_val:.3f}"
     else:
         label = f"ES={running_sum_list[nn]:.3f}"
-    ax1.text(len(running_sum_list) / 30, 0, label, size=fs_label,
-             bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none", "pad": 1},
-             ha="left", va=va, zorder=100)
+    ax1.text(
+        len(running_sum_list) / 30,
+        0,
+        label,
+        size=fs_label,
+        bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none", "pad": 1},
+        ha="left",
+        va=va,
+        zorder=100,
+    )
 
     ax1.grid(True, which="both")
     ax1.set(xticks=[])
@@ -94,14 +109,34 @@ def running_sum(
         plt.xlim([0, N])
         plt.ylim([0, 1])
         ax1.set(yticks=[], xticks=[])
-        posv = np.percentile(range(len(rank_vec[rank_vec > 0])), np.linspace(0, 100, 10))
+        posv = np.percentile(
+            range(len(rank_vec[rank_vec > 0])), np.linspace(0, 100, 10)
+        )
         for i in range(9):
-            plt.gca().add_patch(Rectangle((posv[i], 0), posv[i + 1] - posv[i], 0.5,
-                                          linewidth=0, facecolor="red", alpha=0.6 * (1 - i * 0.1)))
-        negv = np.percentile(range(len(rank_vec[rank_vec <= 0])), np.linspace(0, 100, 10))
+            plt.gca().add_patch(
+                Rectangle(
+                    (posv[i], 0),
+                    posv[i + 1] - posv[i],
+                    0.5,
+                    linewidth=0,
+                    facecolor="red",
+                    alpha=0.6 * (1 - i * 0.1),
+                )
+            )
+        negv = np.percentile(
+            range(len(rank_vec[rank_vec <= 0])), np.linspace(0, 100, 10)
+        )
         for i in range(9):
-            plt.gca().add_patch(Rectangle((posv[-1] + negv[i], 0), negv[i + 1] - negv[i], 0.5,
-                                          linewidth=0, facecolor="blue", alpha=0.6 * (0.1 + i * 0.1)))
+            plt.gca().add_patch(
+                Rectangle(
+                    (posv[-1] + negv[i], 0),
+                    negv[i + 1] - negv[i],
+                    0.5,
+                    linewidth=0,
+                    facecolor="blue",
+                    alpha=0.6 * (0.1 + i * 0.1),
+                )
+            )
         plt.subplots_adjust(left=0, bottom=0, right=1, top=1, wspace=0, hspace=0)
         plt.xlabel("Rank", fontsize=24)
     else:
@@ -120,10 +155,17 @@ def running_sum(
         plt.ylim([rank_vec.min(), rank_vec.max()])
         minabs = np.abs(rank_vec).min()
         zero_cross = int(np.where(np.abs(rank_vec) == minabs)[0][0])
-        ax1.vlines(x=zero_cross, ymin=rank_vec.min(), ymax=rank_vec.max(), linestyle=":")
-        ax1.text(zero_cross, rank_vec.max() / 3, f"Zero crosses at {zero_cross}",
-                 bbox={"facecolor": "white", "alpha": 0.5, "edgecolor": "none", "pad": 1},
-                 ha="center", va="center")
+        ax1.vlines(
+            x=zero_cross, ymin=rank_vec.min(), ymax=rank_vec.max(), linestyle=":"
+        )
+        ax1.text(
+            zero_cross,
+            rank_vec.max() / 3,
+            f"Zero crosses at {zero_cross}",
+            bbox={"facecolor": "white", "alpha": 0.5, "edgecolor": "none", "pad": 1},
+            ha="center",
+            va="center",
+        )
         plt.subplots_adjust(left=0, bottom=0, right=1, top=1, wspace=0, hspace=0)
         plt.xlabel("Rank in Ordered Dataset", fontsize=16)
         plt.ylabel("Ranked list metric", fontsize=16)
